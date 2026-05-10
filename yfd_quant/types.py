@@ -1,7 +1,6 @@
 """核心数据类型定义"""
 
 from dataclasses import dataclass, field
-from typing import Optional
 from datetime import datetime
 
 

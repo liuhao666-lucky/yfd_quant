@@ -54,7 +54,7 @@ def _calc_r_nq(sina) -> float:
     return 0.0
 
 
-def fetch_all(config: dict = None) -> Tuple[MarketSnapshot, bool]:
+def fetch_all() -> Tuple[MarketSnapshot, bool]:
     timestamp = datetime.now()
     weekend = _is_weekend()
 
@@ -62,6 +62,10 @@ def fetch_all(config: dict = None) -> Tuple[MarketSnapshot, bool]:
     sina = sina_fetch_all()
     if not sina.ok:
         raise DataUnavailableError(f"Sina 数据获取失败: {sina.error}")
+
+    # CPO 检查：工作日缺失时警告（非阻断，节假日/网络波动可能）
+    if sina.cpo_error and not weekend:
+        logger.warning("CPO 数据获取失败，R_CPO 将为 0（可能影响模型准确性）")
 
     # ---- 计算 R_NQ（必须在存入今日 NQ 之前）----
     r_nq = _calc_r_nq(sina)

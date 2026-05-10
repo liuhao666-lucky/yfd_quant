@@ -86,65 +86,65 @@ def main():
     setup_logging(config)
     logger = logging.getLogger(__name__)
 
-    # ---- 全功能测试（不影响数据库） ----
+    # ---- YFD Quant Agent Self-Test (read-only, no DB writes) ----
     if args.test:
         print("=" * 50)
-        print("  易方达量化 Agent 全功能测试")
+        print("  YFD Quant Agent - Self Test")
         print("=" * 50)
 
         errors = []
 
-        # 1. 依赖检查
-        print("\n[1/5] 依赖检查...")
+        # 1. Dependencies
+        print("\n[1/5] Dependencies...")
         try:
-            import pandas, requests, yaml, rich
+            import pandas, requests, yaml, rich  # noqa: F401
             print("  OK: pandas, requests, pyyaml, rich")
         except ImportError as e:
-            errors.append(f"依赖缺失: {e}")
+            errors.append(f"Dependency missing: {e}")
             print(f"  FAIL: {e}")
 
-        # 2. 配置文件
-        print("\n[2/5] 配置文件...")
+        # 2. Config
+        print("\n[2/5] Config file...")
         try:
             config = load_config(args.config)
-            print(f"  OK: config.yaml 已加载 (M={config.get('M')}, M_min={config.get('M_min')})")
+            print(f"  OK: config.yaml loaded (M={config.get('M')}, M_min={config.get('M_min')})")
         except FileNotFoundError:
-            errors.append("config.yaml 不存在，请先复制 config.example.yaml")
-            print("  FAIL: config.yaml 不存在")
+            errors.append("config.yaml not found. Copy config.example.yaml to config.yaml")
+            print("  FAIL: config.yaml not found")
 
-        # 3. Sina API 连通性
-        print("\n[3/5] Sina API 连通性...")
+        # 3. Sina API
+        print("\n[3/5] Sina API connectivity...")
         try:
             from yfd_quant.data.sina_fetcher import fetch_all as sina_fetch
             s = sina_fetch()
             if s.ok:
                 print(f"  OK: NDX={s.ndx_price:.1f} CPO={s.cpo_price:.1f} VIX={s.vix:.1f} FX={s.fx_price:.4f} NQ={s.nq_future:.1f}")
             else:
-                errors.append(f"Sina 数据异常: {s.error}")
+                errors.append(f"Sina data error: {s.error}")
                 print(f"  FAIL: {s.error}")
         except Exception as e:
-            errors.append(f"Sina 连接失败: {e}")
+            errors.append(f"Sina connection failed: {e}")
             print(f"  FAIL: {e}")
 
-        # 4. 数据库
-        print("\n[4/5] 数据库...")
+        # 4. Database
+        print("\n[4/5] Database...")
         try:
-            from yfd_quant.data.db import count as db_count, get_all, cpo_count
+            from yfd_quant.data.db import get_all, cpo_count
             ndx_n = db_count()
             cpo_n = cpo_count()
             if ndx_n > 0:
                 df = get_all()
                 latest = df.iloc[-1]
-                print(f"  OK: NDX {ndx_n}行 (最新 {df.index[-1].date()} close={latest['close']:.1f}) CPO {cpo_n}行")
+                print(f"  OK: NDX {ndx_n} rows (latest {df.index[-1].date()} close={latest['close']:.1f}) CPO {cpo_n} rows")
             else:
-                errors.append("NDX 历史数据为空，请先 --import-kline")
-                print("  FAIL: NDX 历史数据为空")
+                errors.append("NDX history empty. Run: --import-kline ndx_history_raw.py")
+                print("  FAIL: NDX history empty")
         except Exception as e:
-            errors.append(f"数据库错误: {e}")
+            errors.append(f"Database error: {e}")
             print(f"  FAIL: {e}")
 
-        # 5. 模型计算 + 单元测试
-        print("\n[5/5] 模型计算 + 单元测试...")
+        # 5. Unit tests
+        print("\n[5/5] Unit tests...")
         import subprocess
         result = subprocess.run(
             ["python", "-m", "pytest", "yfd_quant/tests/", "-q"],
@@ -154,21 +154,21 @@ def main():
             passed = result.stdout.strip().split("\n")[-1] if result.stdout.strip() else "OK"
             print(f"  OK: {passed}")
         else:
-            errors.append("单元测试失败")
+            errors.append("Unit tests failed")
             print(f"  FAIL:\n{result.stdout[-300:]}{result.stderr[-200:]}")
 
-        # 通知配置
+        # Notify config
         wc = config.get("notify", {}).get("wecom_webhook", "")
-        print(f"\n通知配置: {'已配置' if wc else '未配置 (可选)'}")
+        print(f"\nNotify: {'configured' if wc else 'not set (optional)'}")
 
-        # 汇总
+        # Summary
         print("\n" + "=" * 50)
         if errors:
-            print(f"  {len(errors)} 项失败:")
+            print(f"  {len(errors)} FAILED:")
             for e in errors:
                 print(f"    - {e}")
         else:
-            print("  全部通过")
+            print("  ALL PASSED")
         print("=" * 50)
         return
 
@@ -229,6 +229,7 @@ def main():
         return
 
     # ---- 补录实际数据 ----
+    if args.backfill_actual:
         parts = args.backfill_actual.split(",")
         if len(parts) != 3:
             print("格式错误。示例: --backfill-actual 2026-05-08,29200,29500")

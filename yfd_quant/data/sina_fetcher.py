@@ -37,6 +37,7 @@ class SinaData:
     cpo_prev_close: float = 0.0  # 昨收点位
     cpo_change_pct: float = 0.0  # 涨跌幅%（自算）
     cpo_date: str = ""
+    cpo_error: bool = False      # True = CPO 获取失败
 
     # VIX (hf_VX)
     vix: float = 0.0
@@ -109,12 +110,12 @@ def fetch_all() -> SinaData:
         # ---- gn0701159: CPO概念 ----
         # A股概念板块: [0]名称 [1]今开 9133.71 [2]昨收 9310.56 [3]收盘 9427.95 [4]最高 [5]最低
         f = _parse_field(text, "gn0701159")
-        data.cpo_prev_close = float(f[2])  # 昨收
-        data.cpo_price = float(f[3])       # 收盘
+        data.cpo_prev_close = float(f[2])
+        data.cpo_price = float(f[3])
         data.cpo_change_pct = _compute_change(data.cpo_price, data.cpo_prev_close)
         data.cpo_date = f[30] if len(f) > 30 else ""
     except SinaError:
-        pass
+        data.cpo_error = True  # 非A股交易日属正常，工作日缺失由上层裁决
 
     try:
         # ---- hf_VX: VIX ----

@@ -11,8 +11,10 @@ def _post_markdown(webhook_url: str, content: str) -> bool:
         resp = requests.post(webhook_url, json={
             "msgtype": "markdown", "markdown": {"content": content},
         }, timeout=10)
-        return resp.status_code == 200 and resp.json().get("errcode") == 0
-    except requests.RequestException:
+        if resp.status_code != 200:
+            return False
+        return resp.json().get("errcode") == 0
+    except (requests.RequestException, ValueError):
         return False
 
 
@@ -114,7 +116,7 @@ def send_model_result(result: ModelResult, webhook_url: str) -> bool:
 - 预估今晚开盘：P_est = {result.p_est:.1f}（昨收 {result.ndx_close_prev:.1f} × 期货变化）{bias_msg}
 - 极端崩盘双杀：{'未触发' if alpha.omega_ext==0 else f'+{alpha.omega_ext:.0f}分'}
   <font color="comment">（中美同时暴跌超5%才触发，平时不启动）</font>
-- 一年水位位置：{'已跌入底部' + str(alpha.p_pos) + '%区间，+{alpha.omega_pos:.1f}分' if alpha.omega_pos>0 else '未跌入底部20%，不加分'}
+- 一年水位位置：{f'已跌入底部{alpha.p_pos:.1f}%区间，+{alpha.omega_pos:.1f}分' if alpha.omega_pos>0 else '未跌入底部20%，不加分'}
   <font color="comment">（价格越低越靠近历史大坑，越加分）</font>
 - RSI衰竭信号：{rsi_msg}
 

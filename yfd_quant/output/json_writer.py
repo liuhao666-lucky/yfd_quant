@@ -2,8 +2,6 @@
 
 import json
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
 
 from yfd_quant.types import ModelResult
 

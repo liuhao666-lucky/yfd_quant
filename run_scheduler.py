@@ -17,7 +17,7 @@ import time
 import logging
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 logging.basicConfig(
