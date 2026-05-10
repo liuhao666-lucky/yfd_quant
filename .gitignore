@@ -1,0 +1,35 @@
+# 配置文件（含 API 密钥）
+config.yaml
+
+# 环境变量
+.env
+
+# 数据库
+output/quant.db
+output/*.db
+
+# 缓存
+cache/
+__pycache__/
+*.pyc
+
+# 输出
+output/*.json
+output/history.json
+output/ndx_history.csv
+
+# IDE
+.vscode/
+.idea/
+.history/
+
+# 日志
+quant.log
+*.log
+
+# 临时文件
+~$*.xlsx
+
+# Python
+*.egg-info/
+dist/

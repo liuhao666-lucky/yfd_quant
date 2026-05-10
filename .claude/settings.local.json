@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m pytest yfd_quant/tests/ -q)",
+      "Bash(python -c ' *)",
+      "Bash(python -m yfd_quant.main --debug)"
+    ]
+  }
+}

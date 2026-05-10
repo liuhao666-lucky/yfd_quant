@@ -1,0 +1,43 @@
+# 易方达量化定投 Agent 配置文件
+# 复制此文件为 config.yaml 并填入真实值
+
+# --- 投资参数 ---
+M: 20.0
+M_min: 0.0
+timezone_discount: 0.85
+
+# --- 数据源（全部免费，国内直连）---
+sina:
+  fx_usdcnh: "fx_susdcnh"
+  vix: "hf_VX"
+  cpo_nodes:
+    - "gn0701159"
+
+# --- 缓存 ---
+cache:
+  dir: "./cache"
+  realtime_ttl: 300
+  historical_ttl: 86400
+
+# --- 输出 ---
+output:
+  dir: "./output"
+  json: true
+  history_file: "./output/history.json"
+  max_history: 365
+
+# --- 通知 (可选) ---
+notify:
+  wecom_webhook: ""      # 企业微信机器人 Webhook URL
+  bark_url: ""           # Bark 推送 URL (仅 iOS)
+
+# --- 定时任务 ---
+schedule:
+  main_time: "14:50"      # 主模型运行时间
+  nq_capture_time: "05:15" # NQ 收盘抓取 (夏令时 05:15, 冬令时 04:15 北京)
+  enabled: false           # 是否启用内置定时器
+
+# --- 日志 ---
+log:
+  level: "INFO"
+  file: "quant.log"

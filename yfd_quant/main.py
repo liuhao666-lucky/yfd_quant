@@ -1,0 +1,360 @@
+"""易方达量化定投 Agent —— CLI 入口
+
+用法:
+  python -m yfd_quant.main                     # 运行模型
+  python -m yfd_quant.main --notify            # 运行 + 推送通知
+  python -m yfd_quant.main --import-csv data.csv  # 导入 NDX 历史数据
+  python -m yfd_quant.main -M 100 -m 20        # 自定义金额
+"""
+
+import argparse
+import logging
+import sys
+from pathlib import Path
+from datetime import datetime
+
+from yfd_quant.config import load_config
+from yfd_quant.data.orchestrator import fetch_all, DataUnavailableError
+from yfd_quant.data.db import (
+    import_csv, import_from_sina_kline, count as db_count,
+    insert_nq_daily, get_nq_prev_close,
+    save_validation, update_actual, get_pending_validations,
+    get_validation_stats,
+    insert_fund_nav, get_fund_navs,
+)
+from yfd_quant.model.engine import QuantEngine
+from yfd_quant.output.console import render as console_render, render_debug
+from yfd_quant.output.json_writer import write_single, append_history
+from yfd_quant.output.notify import (
+    send_model_result, send_capture_result, send_error_notify, build_stats_text,
+)
+
+
+def setup_logging(config):
+    log_cfg = config.get("log", {})
+    level = getattr(logging, log_cfg.get("level", "INFO").upper(), logging.INFO)
+    fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+    handlers = [logging.StreamHandler()]
+    log_file = log_cfg.get("file")
+    if log_file:
+        Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+    logging.basicConfig(level=level, format=fmt, handlers=handlers)
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="易方达全球成长精选 (012922) 量化定投决策 Agent",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="示例:\n"
+               "  python -m yfd_quant.main                # 运行模型\n"
+               "  python -m yfd_quant.main --notify       # 运行并推送通知\n"
+               "  python -m yfd_quant.main --import-csv ndx_200days.csv  # 导入历史数据",
+    )
+    parser.add_argument("-c", "--config", default=None, help="配置文件路径")
+    parser.add_argument("-M", "--max-amount", type=float, default=None, help="单日最大申购额")
+    parser.add_argument("-m", "--min-amount", type=float, default=None, help="每日强制底仓")
+    parser.add_argument("--notify", action="store_true", help="运行后推送通知")
+    parser.add_argument("--json-only", action="store_true", help="仅输出 JSON")
+    parser.add_argument("--import-csv", metavar="PATH", help="导入 NDX 历史 CSV 到 SQLite")
+    parser.add_argument("--import-kline", metavar="FILE.py",
+                        help="从 Sina K线格式 Python 文件导入 (含 raw_data 字符串)")
+    parser.add_argument("--capture-nq", action="store_true",
+                        help="抓取当前 NQ 期货价格存入数据库（美股收盘时运行）")
+    parser.add_argument("--backfill-actual", metavar="DATE,OPEN,CLOSE",
+                        help="补录某日实际纳指100开盘收盘，格式: 2026-05-08,29200,29500")
+    parser.add_argument("--stats", action="store_true",
+                        help="显示模型验证统计")
+    parser.add_argument("--update-nav", metavar="DATE,NAV,RETURN",
+                        help="录入基金净值，格式: 2026-05-08,1.2345,-0.0123")
+    parser.add_argument("-v", "--verbose", action="store_true", help="详细日志")
+    parser.add_argument("--debug", action="store_true", help="打印模型全部指标")
+    parser.add_argument("--test", action="store_true", help="运行全功能测试（不影响数据库）")
+
+    args = parser.parse_args()
+
+    # 加载配置
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError as e:
+        print(f"错误: {e}")
+        sys.exit(1)
+
+    if args.verbose:
+        config["log"]["level"] = "DEBUG"
+
+    setup_logging(config)
+    logger = logging.getLogger(__name__)
+
+    # ---- 全功能测试（不影响数据库） ----
+    if args.test:
+        print("=" * 50)
+        print("  易方达量化 Agent 全功能测试")
+        print("=" * 50)
+
+        errors = []
+
+        # 1. 依赖检查
+        print("\n[1/5] 依赖检查...")
+        try:
+            import pandas, requests, yaml, rich
+            print("  OK: pandas, requests, pyyaml, rich")
+        except ImportError as e:
+            errors.append(f"依赖缺失: {e}")
+            print(f"  FAIL: {e}")
+
+        # 2. 配置文件
+        print("\n[2/5] 配置文件...")
+        try:
+            config = load_config(args.config)
+            print(f"  OK: config.yaml 已加载 (M={config.get('M')}, M_min={config.get('M_min')})")
+        except FileNotFoundError:
+            errors.append("config.yaml 不存在，请先复制 config.example.yaml")
+            print("  FAIL: config.yaml 不存在")
+
+        # 3. Sina API 连通性
+        print("\n[3/5] Sina API 连通性...")
+        try:
+            from yfd_quant.data.sina_fetcher import fetch_all as sina_fetch
+            s = sina_fetch()
+            if s.ok:
+                print(f"  OK: NDX={s.ndx_price:.1f} CPO={s.cpo_price:.1f} VIX={s.vix:.1f} FX={s.fx_price:.4f} NQ={s.nq_future:.1f}")
+            else:
+                errors.append(f"Sina 数据异常: {s.error}")
+                print(f"  FAIL: {s.error}")
+        except Exception as e:
+            errors.append(f"Sina 连接失败: {e}")
+            print(f"  FAIL: {e}")
+
+        # 4. 数据库
+        print("\n[4/5] 数据库...")
+        try:
+            from yfd_quant.data.db import count as db_count, get_all, cpo_count
+            ndx_n = db_count()
+            cpo_n = cpo_count()
+            if ndx_n > 0:
+                df = get_all()
+                latest = df.iloc[-1]
+                print(f"  OK: NDX {ndx_n}行 (最新 {df.index[-1].date()} close={latest['close']:.1f}) CPO {cpo_n}行")
+            else:
+                errors.append("NDX 历史数据为空，请先 --import-kline")
+                print("  FAIL: NDX 历史数据为空")
+        except Exception as e:
+            errors.append(f"数据库错误: {e}")
+            print(f"  FAIL: {e}")
+
+        # 5. 模型计算 + 单元测试
+        print("\n[5/5] 模型计算 + 单元测试...")
+        import subprocess
+        result = subprocess.run(
+            ["python", "-m", "pytest", "yfd_quant/tests/", "-q"],
+            cwd=str(Path(__file__).parent.parent), capture_output=True, text=True, timeout=60,
+        )
+        if result.returncode == 0:
+            passed = result.stdout.strip().split("\n")[-1] if result.stdout.strip() else "OK"
+            print(f"  OK: {passed}")
+        else:
+            errors.append("单元测试失败")
+            print(f"  FAIL:\n{result.stdout[-300:]}{result.stderr[-200:]}")
+
+        # 通知配置
+        wc = config.get("notify", {}).get("wecom_webhook", "")
+        print(f"\n通知配置: {'已配置' if wc else '未配置 (可选)'}")
+
+        # 汇总
+        print("\n" + "=" * 50)
+        if errors:
+            print(f"  {len(errors)} 项失败:")
+            for e in errors:
+                print(f"    - {e}")
+        else:
+            print("  全部通过")
+        print("=" * 50)
+        return
+
+    # ---- NQ 期货收盘抓取 + 自动补录昨日验证 ----
+    if args.capture_nq:
+        from yfd_quant.data.sina_fetcher import fetch_all as sina_fetch
+        s = sina_fetch()
+        if not s.ok:
+            print("错误: 无法获取 Sina 数据")
+            sys.exit(1)
+
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        # 1. 保存 NQ 期货收盘价
+        if s.nq_future > 0:
+            insert_nq_daily(today, s.nq_future)
+            print(f"[1/2] NQ 期货收盘价已保存: {s.nq_future:.2f}")
+
+        # 2. 自动补录昨日 validation（只补最近一条，防止跨天错位）
+        pending = get_pending_validations()
+        msg_parts = []
+        if pending and s.ndx_open > 0 and s.ndx_price > 0:
+            # 只补最近一条（gb_ndx 的 OHLC 仅对最新 pending 有效）
+            latest_pending = pending[-1]  # 按日期排序，最后一条是最新的
+            update_actual(latest_pending["date"], s.ndx_open, s.ndx_price)
+            msg = f"{latest_pending['date']}: 开={s.ndx_open:.1f} 收={s.ndx_price:.1f}"
+            print(f"[2/2] 已补录 {msg}")
+            msg_parts.append(msg)
+            # 如果还有更早的未补录，提示用户手动处理
+            if len(pending) > 1:
+                old_dates = [p["date"] for p in pending[:-1]]
+                print(f"[!] 尚有 {len(old_dates)} 条断档未补: {old_dates}")
+                print(f"    如需补录: python -m yfd_quant.main --backfill-actual 日期,开盘,收盘")
+        elif pending:
+            print(f"[2/2] 跳过补录 ({len(pending)}条待补录，gb_ndx数据不可用)")
+
+        # 3. 推送通知（含检验统计）
+        wc = config.get("notify", {}).get("wecom_webhook", "")
+        if wc:
+            stats_text = build_stats_text()
+            ok = send_capture_result(s.nq_future, msg_parts, wc, stats_text)
+            print(f"[3/3] 企业微信推送: {'成功' if ok else '失败'}")
+        return
+
+    # ---- 录入基金净值 ----
+    if args.update_nav:
+        parts = args.update_nav.split(",")
+        if len(parts) < 2:
+            print("格式: --update-nav 2026-05-08,1.2345,-0.0123")
+            sys.exit(1)
+        date = parts[0].strip()
+        nav = float(parts[1])
+        ret = float(parts[2]) if len(parts) > 2 else 0.0
+        insert_fund_nav(date, nav, ret)
+        print(f"已录入: {date} 净值={nav:.4f} 日收益={ret:+.2%}")
+        navs = get_fund_navs()
+        print(f"现有 {len(navs)} 条净值记录")
+        return
+
+    # ---- 补录实际数据 ----
+        parts = args.backfill_actual.split(",")
+        if len(parts) != 3:
+            print("格式错误。示例: --backfill-actual 2026-05-08,29200,29500")
+            sys.exit(1)
+        update_actual(parts[0].strip(), float(parts[1]), float(parts[2]))
+        print(f"已补录 {parts[0]}: 开盘={parts[1]} 收盘={parts[2]}")
+        pending = get_pending_validations()
+        if pending:
+            print(f"尚有 {len(pending)} 条待补录")
+            for p in pending:
+                print(f"  {p['date']}: P_est={p['p_est']:.1f}")
+        return
+
+    # ---- 验证统计 ----
+    if args.stats:
+        stats = get_validation_stats()
+        navs = get_fund_navs()
+
+        print("=== 模型验证统计 ===\n")
+        if stats["count"] == 0:
+            print("暂无验证数据。每天 05:15 --capture-nq 自动补录。")
+        else:
+            for d in stats["details"]:
+                sbi_label = "强烈买入" if d["sbi"] >= 70 else ("适当买入" if d["sbi"] >= 40 else "仅底仓")
+                fwd = d["forward_return"]
+                fwd_str = f"{fwd:+.2f}%" if fwd and fwd != 0 else "待次日补录"
+                print(f"--- {d['date']} (SBI={d['sbi']:.0f} {sbi_label}) ---")
+                print(f"  P_est 偏差: {d['deviation_calc']}")
+                print(f"    正=低估(实际>预估)  负=高估(实际<预估)")
+                print(f"  entry_return(入场日涨跌): {d['entry_calc']}")
+                print(f"    负=买到跌了=划算  正=买到涨了=买贵了")
+                print(f"  forward_return(买入后涨跌): {fwd_str}")
+                print(f"    正=买入后涨了=赚了  负=买入后跌了  待次日记入")
+                print()
+
+            print(f"[汇总] P_est 平均绝对偏差: {stats['p_est_mae']:.2f}% | 方向偏差: {stats['p_est_bias']:+.2f}%")
+            print(f"[汇总] 入场日均收益: {stats['avg_entry_return']:+.2f}% | 买入后均收益: {stats['avg_forward_return']:+.2f}%")
+            print(f"[分桶] SBI<30: {stats['sbi_buckets']['low']['count']}天 | 30-70: {stats['sbi_buckets']['mid']['count']}天 | >=70: {stats['sbi_buckets']['high']['count']}天")
+
+        if navs:
+            print(f"\n[基金净值] ({len(navs)} 条)")
+            for n in navs[-5:]:
+                print(f"  {n['date']}  净值={n['nav']:.4f}  日收益={n['daily_return']:+.2%}")
+        else:
+            print(f"\n[基金净值] 暂无。录入: --update-nav 日期,净值,日收益率")
+        return
+
+    # ---- 导入模式 ----
+    if args.import_csv or args.import_kline:
+        if args.import_csv:
+            try:
+                n = import_csv(args.import_csv)
+            except FileNotFoundError as e:
+                print(f"错误: {e}")
+                sys.exit(1)
+        else:
+            # 从 Python 文件读取 raw_data 字符串
+            import importlib.util
+            spec = importlib.util.spec_from_file_location("data_mod", args.import_kline)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            if not hasattr(mod, "raw_data"):
+                print("错误: 文件中未找到 raw_data 变量")
+                sys.exit(1)
+            n = import_from_sina_kline(mod.raw_data)
+        print(f"已导入 {n} 条 NDX 历史数据")
+        print(f"数据库现有 {db_count()} 条记录")
+        return
+
+    # 合并 CLI 参数
+    M = args.max_amount if args.max_amount is not None else config.get("M", 50.0)
+    M_min = args.min_amount if args.min_amount is not None else config.get("M_min", 10.0)
+    tz_discount = config.get("timezone_discount", 0.85)
+
+    logger.info(f"参数: M={M}, M_min={M_min}")
+    logger.info(f"数据源: Sina hq.sinajs.cn 批量请求")
+
+    # ---- 抓取数据 ----
+    try:
+        snapshot, weekend = fetch_all()
+        logger.info(f"数据就绪, NDX历史: {db_count()} 天, 周末: {weekend}")
+    except DataUnavailableError as e:
+        logger.error(f"数据获取失败: {e}")
+        if args.notify:
+            send_error_notify(config.get("notify", {}).get("wecom_webhook", ""), str(e))
+        sys.exit(1)
+
+    # ---- 运行模型 ----
+    engine = QuantEngine()
+    try:
+        result = engine.run(snapshot, M=M, M_min=M_min, timezone_discount=tz_discount)
+    except ValueError as e:
+        logger.error(f"模型计算失败: {e}")
+        sys.exit(1)
+
+    # ---- 输出 ----
+    out_cfg = config.get("output", {})
+    out_dir = Path(out_cfg.get("dir", "./output"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    if out_cfg.get("json", True):
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        write_single(result, out_dir / f"{ts}.json")
+        append_history(result, Path(out_cfg.get("history_file", "./output/history.json")))
+
+    if not args.json_only:
+        console_render(result, weekend)
+        if args.debug:
+            render_debug(result)
+    else:
+        import json
+        from yfd_quant.output.json_writer import result_to_dict
+        print(json.dumps(result_to_dict(result), ensure_ascii=False))
+
+    # 推送
+    if args.notify:
+        wc = config.get("notify", {}).get("wecom_webhook", "")
+        ok = send_model_result(result, wc)
+        logger.info(f"企业微信推送: {'成功' if ok else '失败'}")
+
+    # 验证记录（仅工作日写入，周末只看不写）
+    if not weekend:
+        save_validation(datetime.now().strftime("%Y-%m-%d"), result)
+
+    logger.info(f"完成: SBI={result.sbi}, Amount={result.recommended_amount:.2f}")
+
+
+if __name__ == "__main__":
+    main()
