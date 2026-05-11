@@ -26,7 +26,7 @@ from yfd_quant.model.engine import QuantEngine
 from yfd_quant.output.console import render as console_render, render_debug
 from yfd_quant.output.json_writer import write_single, append_history
 from yfd_quant.output.notify import (
-    send_model_result, send_capture_result, send_error_notify, build_stats_text,
+    send_model_result, send_capture_result, send_error_notify,
 )
 
 
@@ -118,7 +118,7 @@ def main():
             from yfd_quant.data.sina_fetcher import fetch_all as sina_fetch
             s = sina_fetch()
             if s.ok:
-                print(f"  OK: NDX={s.ndx_price:.1f} CPO={s.cpo_price:.1f} VIX={s.vix:.1f} FX={s.fx_price:.4f} NQ={s.nq_future:.1f}")
+                print(f"  OK: NDX={s.ndx_price:.1f} CPO={s.cpo_price:.1f} VIX={s.vix:.1f} FX={s.fx_price:.4f} NQ={s.nq_price:.1f}")
             else:
                 errors.append(f"Sina data error: {s.error}")
                 print(f"  FAIL: {s.error}")
@@ -174,50 +174,98 @@ def main():
 
     # ---- NQ 期货收盘抓取 + 自动补录昨日验证 ----
     if args.capture_nq:
-        from yfd_quant.data.sina_fetcher import fetch_all as sina_fetch
+        from yfd_quant.data.sina_fetcher import (
+            fetch_all as sina_fetch,
+            get_us_equity_trade_date, get_cpo_trade_date, get_fx_trade_date,
+            is_us_close_window,
+        )
+        from yfd_quant.data.db import has_final_record
         s = sina_fetch()
         if not s.ok:
-            print("错误: 无法获取 Sina 数据")
+            print("Sina fetch failed")
             sys.exit(1)
 
-        today = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+        op_time = now.strftime("%Y-%m-%d %H:%M:%S")
+        # 收盘后窗口: 夏令时 04-06, 冬令时 05-07
+        in_close_window = is_us_close_window(now)
+        close_mode = in_close_window
+        is_final = 1 if in_close_window else 0
 
-        # 1. 保存 NQ 期货收盘价
-        if s.nq_future > 0:
-            insert_nq_daily(today, s.nq_future)
-            print(f"[1/3] NQ 期货收盘: {s.nq_future:.2f}")
+        us_date = get_us_equity_trade_date(now, is_close_mode=close_mode)
+        cpo_date = get_cpo_trade_date(now, is_close_mode=close_mode)
+        fx_date = get_fx_trade_date(now)
+        print(f"window={'close' if in_close_window else 'open'} is_final={is_final} "
+              f"us={us_date} cpo={cpo_date} fx={fx_date}")
+        if not in_close_window:
+            print("WARNING: 非美股收盘窗口，is_final=0（盘中临时数据）")
 
-        # 2. 保存 NDX 纳指100日线 OHLCV（gb_ndx: [5]O [6]H [7]L [1]C [10]V）
+        from yfd_quant.data.db import (
+            insert_daily, insert_cpo_daily, insert_fx_daily, insert_vix_daily,
+        )
+
+        def _should_write(table, date):
+            if in_close_window:
+                return True
+            return not has_final_record(table, date)
+
+        n = 0
+        # 1. NQ
+        if s.nq_price > 0 and _should_write("nq_daily", us_date):
+            insert_nq_daily(us_date, s.nq_open, s.nq_high, s.nq_low,
+                            s.nq_price, op_time, is_final=is_final)
+            print(f"[{n+1}/5] NQ: {us_date} C={s.nq_price:.1f} is_final={is_final}")
+            n += 1
+
+        # 2. NDX
         if s.ndx_open > 0 and s.ndx_price > 0:
-            from yfd_quant.data.db import insert_daily
-            insert_daily(s.ndx_time[:10], s.ndx_open, s.ndx_high,
-                         s.ndx_low, s.ndx_price, s.ndx_volume)
-            print(f"[2/3] NDX 日线: {s.ndx_time[:10]} O={s.ndx_open:.1f} H={s.ndx_high:.1f} L={s.ndx_low:.1f} C={s.ndx_price:.1f} V={s.ndx_volume}")
+            insert_daily(us_date, s.ndx_open, s.ndx_high,
+                         s.ndx_low, s.ndx_price, s.ndx_volume, op_time)
+            print(f"[{n+1}/5] NDX: {us_date} C={s.ndx_price:.1f} V={s.ndx_volume}")
+            n += 1
 
-        # 3. 自动补录昨日 validation（只补最近一条，防止跨天错位）
+        # 3. CPO
+        if s.cpo_price > 0:
+            insert_cpo_daily(cpo_date, s.cpo_open, s.cpo_high, s.cpo_low,
+                             s.cpo_price, s.cpo_volume, s.cpo_amount, op_time)
+            print(f"[{n+1}/5] CPO: {cpo_date} C={s.cpo_price:.1f}")
+            n += 1
+
+        # 4. FX
+        if s.fx_price > 0 and _should_write("fx_daily", us_date):
+            insert_fx_daily(us_date, s.fx_price, op_time, is_final=is_final)
+            print(f"[{n+1}/5] FX: {us_date} C={s.fx_price:.4f} is_final={is_final}")
+            n += 1
+
+        # 5. VIX
+        if s.vix > 0 and _should_write("vix_daily", us_date):
+            insert_vix_daily(us_date, s.vix_open, s.vix_high, s.vix_low,
+                             s.vix, op_time, is_final=is_final)
+            print(f"[{n+1}/5] VIX: {us_date} C={s.vix:.2f} is_final={is_final}")
+            n += 1
+
+        # validation 补录
         pending = get_pending_validations()
         msg_parts = []
         if pending and s.ndx_open > 0 and s.ndx_price > 0:
-            # 只补最近一条（gb_ndx 的 OHLC 仅对最新 pending 有效）
-            latest_pending = pending[-1]  # 按日期排序，最后一条是最新的
+            latest_pending = pending[-1]
             update_actual(latest_pending["date"], s.ndx_open, s.ndx_price)
             msg = f"{latest_pending['date']}: 开={s.ndx_open:.1f} 收={s.ndx_price:.1f}"
-            print(f"[3/3] 已补录 {msg}")
+            print(f"[4/4] 已补录 {msg}")
             msg_parts.append(msg)
             # 如果还有更早的未补录，提示用户手动处理
             if len(pending) > 1:
                 old_dates = [p["date"] for p in pending[:-1]]
                 print(f"[!] 尚有 {len(old_dates)} 条断档未补: {old_dates}")
-                print(f"    如需补录: python -m yfd_quant.main --backfill-actual 日期,开盘,收盘")
+                print(f"    手动: --backfill-actual 日期,开盘,收盘")
         elif pending:
-            print(f"[3/3] 跳过补录 ({len(pending)}条待补录)")
+            print(f"[4/4] 跳过补录 ({len(pending)}条待补录)")
 
-        # 推送通知（含检验统计）
+        # 推送通知
         wc = config.get("notify", {}).get("wecom_webhook", "")
         if wc:
-            stats_text = build_stats_text()
-            ok = send_capture_result(s.nq_future, msg_parts, wc, stats_text)
-            print(f"[3/3] 企业微信推送: {'成功' if ok else '失败'}")
+            ok = send_capture_result(s, msg_parts, wc)
+            print(f"企业微信推送: {'成功' if ok else '失败'}")
         return
 
     # ---- 录入基金净值 ----
@@ -325,6 +373,10 @@ def main():
         sys.exit(1)
 
     # ---- 运行模型 ----
+    from yfd_quant.data.db import get_nq_prev_close, get_fx_prev_close
+    logger.info(f"NQ 当前={snapshot.r_nq:+.2f}% | 昨收(DB)={get_nq_prev_close():.1f}")
+    logger.info(f"FX 当前={snapshot.r_fx:+.4f}% | 昨收(DB)={get_fx_prev_close():.4f}")
+
     engine = QuantEngine()
     try:
         result = engine.run(snapshot, M=M, M_min=M_min, timezone_discount=tz_discount)

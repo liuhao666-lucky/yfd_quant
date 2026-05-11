@@ -10,11 +10,18 @@ import logging
 from datetime import datetime
 from typing import Tuple
 
-from yfd_quant.data.sina_fetcher import fetch_all as sina_fetch_all
+from yfd_quant.data.sina_fetcher import (
+    fetch_all as sina_fetch_all,
+    get_us_equity_trade_date,
+)
 from yfd_quant.data.db import (
     insert_daily, get_all,
-    insert_cpo_daily, get_cpo_ma20,
+    insert_cpo_daily, insert_nq_daily, insert_fx_daily,
+    insert_vix_daily,
+    get_cpo_ma20,
     get_nq_prev_close, get_nq_last_two,
+    get_fx_prev_close,
+    has_final_record,
 )
 from yfd_quant.types import MarketSnapshot
 
@@ -37,21 +44,21 @@ def _check_cpo_downtrend(cpo_close_today: float) -> bool:
 
 
 def _calc_r_nq(sina) -> float:
-    """计算纳指期货实时涨跌幅 R_NQ
+    """纳指期货涨跌幅 R_NQ = (当前 - DB昨收) / DB昨收 × 100
 
-    (hf_NQ当前价 - DB昨收) / DB昨收 * 100
-    昨收缺失时返回 0，不做任何降级
+    DB昨收 = nq_daily 中 date < today 的最近一条记录
+    周一自动取上周五，跳过周末
     """
-    nq_current = sina.nq_future
+    nq_current = sina.nq_price
     nq_prev = get_nq_prev_close()
 
     if nq_prev > 0 and nq_current > 0:
-        r_nq = (nq_current - nq_prev) / nq_prev * 100
-        logger.info(f"R_NQ: 期货 (当前={nq_current:.0f} 昨收={nq_prev:.0f}) = {r_nq:+.2f}%")
-        return round(r_nq, 2)
-
-    logger.warning("R_NQ: 纳指期货昨收缺失！请先运行 --capture-nq 抓取收盘价")
-    return 0.0
+        r_nq = round((nq_current - nq_prev) / nq_prev * 100, 2)
+        logger.info(f"R_NQ = ({nq_current:.1f} - {nq_prev:.1f}) / {nq_prev:.1f} × 100 = {r_nq:+.2f}%")
+    else:
+        r_nq = 0.0
+        logger.warning(f"R_NQ: 昨收缺失(prev={nq_prev:.1f} cur={nq_current:.1f})——请运行 --capture-nq 补录")
+    return r_nq
 
 
 def fetch_all() -> Tuple[MarketSnapshot, bool]:
@@ -70,17 +77,32 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
     # ---- 计算 R_NQ（必须在存入今日 NQ 之前）----
     r_nq = _calc_r_nq(sina)
 
-    # ---- 存入 SQLite（工作日才写，避免周末重复覆盖） ----
+    # ---- 存入 SQLite（工作日；is_final=0 = 盘中暂存, 次日05:15覆盖为 is_final=1） ----
     if not weekend:
+        op_time = timestamp.strftime("%Y-%m-%d %H:%M:%S")
+        trading_date = get_us_equity_trade_date(timestamp, is_close_mode=False)
+
         if sina.ndx_open > 0 and sina.ndx_price > 0:
-            insert_daily(sina.ndx_time[:10], sina.ndx_open,
+            insert_daily(trading_date, sina.ndx_open,
                          sina.ndx_high, sina.ndx_low, sina.ndx_price,
-                         sina.ndx_volume)
+                         sina.ndx_volume, op_time)
 
-        if sina.cpo_price > 0 and sina.cpo_date:
-            insert_cpo_daily(sina.cpo_date, sina.cpo_price)
+        if sina.cpo_price > 0:
+            insert_cpo_daily(trading_date, sina.cpo_open, sina.cpo_high,
+                             sina.cpo_low, sina.cpo_price, sina.cpo_volume,
+                             sina.cpo_amount, op_time)
 
-    # NQ 收盘价由 --capture-nq 单独抓取，此处不写入
+        # NQ/FX/VIX: 仅当交易日尚无 is_final=1 记录时才写 is_final=0
+        if sina.nq_price > 0 and not has_final_record("nq_daily", trading_date):
+            insert_nq_daily(trading_date, sina.nq_open, sina.nq_high,
+                            sina.nq_low, sina.nq_price, op_time, is_final=0)
+
+        if sina.fx_price > 0 and not has_final_record("fx_daily", trading_date):
+            insert_fx_daily(trading_date, sina.fx_price, op_time, is_final=0)
+
+        if sina.vix > 0 and not has_final_record("vix_daily", trading_date):
+            insert_vix_daily(trading_date, sina.vix_open, sina.vix_high,
+                             sina.vix_low, sina.vix, op_time, is_final=0)
 
     # ---- 加载 NDX 历史 (排除最新行，保证指标用 t-1 数据) ----
     ndx_df = get_all()
@@ -104,11 +126,20 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
 
     data_quality = "full" if len(ndx_hist) >= 200 else "degraded"
 
+    # R_FX: (当前 - DB昨收) / DB昨收 × 100
+    fx_prev = get_fx_prev_close()
+    if fx_prev > 0 and sina.fx_price > 0:
+        r_fx = round((sina.fx_price - fx_prev) / fx_prev * 100, 4)
+        logger.info(f"R_FX = ({sina.fx_price:.4f} - {fx_prev:.4f}) / {fx_prev:.4f} × 100 = {r_fx:+.4f}%")
+    else:
+        r_fx = 0.0
+        logger.warning(f"R_FX: 昨收缺失(prev={fx_prev:.4f} cur={sina.fx_price:.4f})——请运行 --capture-nq 补录")
+
     return MarketSnapshot(
         timestamp=timestamp,
         r_cpo=round(sina.cpo_change_pct, 2),
         r_nq=r_nq,
-        r_fx=round(sina.fx_change_pct, 2),
+        r_fx=r_fx,
         cpo_close_today=sina.cpo_price,
         cpo_ma20_yesterday=get_cpo_ma20()[0],
         cpo_ma20_5days_ago=get_cpo_ma20()[1],

@@ -1,11 +1,19 @@
-"""SQLite 数据库 —— NDX 纳斯达克100 + CPO 概念板块历史日线存储
+"""SQLite 数据库 —— 所有表统含 operate_time 操作时间戳
 
-表: ndx_daily (date, open, high, low, close, volume)
-表: cpo_daily (date, close)  — 用于计算 CPO MA20，判断主跌浪
+表:
+  ndx_daily   - 纳指100日线 (O/H/L/C/V)
+  cpo_daily   - A股光模块收盘
+  nq_daily    - 纳指期货收盘
+  validation  - 模型检验
+  fund_nav    - 基金净值
+
+规则: date=交易日期, operate_time=实际入库北京时间 YYYY-MM-DD HH:MM:SS
+  T日收盘 → T+1 05:15 抓取 → date=T, operate_time=T+1 05:15
 """
 
 import sqlite3
 import csv
+from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +21,12 @@ import pandas as pd
 
 DB_PATH = Path(__file__).parent.parent.parent / "output" / "quant.db"
 
-# NDX 表
+
+def _now() -> str:
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ========== NDX 纳指100日线 ==========
 CREATE_NDX = (
     "CREATE TABLE IF NOT EXISTS ndx_daily ("
     "date TEXT PRIMARY KEY, "
@@ -21,58 +34,122 @@ CREATE_NDX = (
     "high REAL NOT NULL, "
     "low REAL NOT NULL, "
     "close REAL NOT NULL, "
-    "volume INTEGER DEFAULT 0)"
+    "volume INTEGER DEFAULT 0, "
+    "operate_time TEXT NOT NULL)"
 )
 INSERT_NDX = (
-    "INSERT OR REPLACE INTO ndx_daily (date, open, high, low, close, volume) "
-    "VALUES (?, ?, ?, ?, ?, ?)"
+    "INSERT OR REPLACE INTO ndx_daily "
+    "(date, open, high, low, close, volume, operate_time) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
 
-# CPO 表
+# ========== CPO A股光模块 ==========
 CREATE_CPO = (
     "CREATE TABLE IF NOT EXISTS cpo_daily ("
     "date TEXT PRIMARY KEY, "
-    "close REAL NOT NULL)"
+    "open REAL NOT NULL, "
+    "high REAL NOT NULL, "
+    "low REAL NOT NULL, "
+    "close REAL NOT NULL, "
+    "volume INTEGER DEFAULT 0, "
+    "amount REAL DEFAULT 0, "
+    "operate_time TEXT NOT NULL)"
 )
-INSERT_CPO = "INSERT OR REPLACE INTO cpo_daily (date, close) VALUES (?, ?)"
+INSERT_CPO = (
+    "INSERT OR REPLACE INTO cpo_daily "
+    "(date, open, high, low, close, volume, amount, operate_time) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+)
 
-# NQ 期货表
+# ========== NQ 纳指期货 ==========
 CREATE_NQ = (
     "CREATE TABLE IF NOT EXISTS nq_daily ("
     "date TEXT PRIMARY KEY, "
-    "close REAL NOT NULL)"
+    "open REAL NOT NULL, "
+    "high REAL NOT NULL, "
+    "low REAL NOT NULL, "
+    "close REAL NOT NULL, "
+    "operate_time TEXT NOT NULL, "
+    "is_final INTEGER DEFAULT 0)"
 )
-INSERT_NQ = "INSERT OR REPLACE INTO nq_daily (date, close) VALUES (?, ?)"
+INSERT_NQ = (
+    "INSERT OR REPLACE INTO nq_daily "
+    "(date, open, high, low, close, operate_time, is_final) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+)
 
-# 验证表 — T+2 QDII 基金: T日15:00前申购 → 净值按T日美股收盘
-# 核心检验: P_est 预测精度 + 入场日收益(SBI高分日是否真便宜)
+# ========== USDCNH 离岸人民币 ==========
+CREATE_FX = (
+    "CREATE TABLE IF NOT EXISTS fx_daily ("
+    "date TEXT PRIMARY KEY, "
+    "close REAL NOT NULL, "
+    "operate_time TEXT NOT NULL, "
+    "is_final INTEGER DEFAULT 0)"
+)
+INSERT_FX = (
+    "INSERT OR REPLACE INTO fx_daily (date, close, operate_time, is_final) "
+    "VALUES (?, ?, ?, ?)"
+)
+
+# ========== VIX 恐慌指数期货 ==========
+CREATE_VIX = (
+    "CREATE TABLE IF NOT EXISTS vix_daily ("
+    "date TEXT PRIMARY KEY, "
+    "open REAL NOT NULL, "
+    "high REAL NOT NULL, "
+    "low REAL NOT NULL, "
+    "close REAL NOT NULL, "
+    "operate_time TEXT NOT NULL, "
+    "is_final INTEGER DEFAULT 0)"
+)
+INSERT_VIX = (
+    "INSERT OR REPLACE INTO vix_daily "
+    "(date, open, high, low, close, operate_time, is_final) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?)"
+)
+
+# ========== 验证表 ==========
 CREATE_VALIDATION = (
     "CREATE TABLE IF NOT EXISTS validation ("
-    "date TEXT PRIMARY KEY, "             # 模型运行日期 (T日)
+    "date TEXT PRIMARY KEY, "
     "sbi REAL, amount REAL, "
     "r_cpo REAL, r_nq REAL, r_fx REAL, vix REAL, "
-    "c_prev REAL, p_est REAL, "          # C_{t-1}, 预估开盘价
+    "c_prev REAL, p_est REAL, "
     "base REAL, omega_ext REAL, omega_bias REAL, omega_pos REAL, rsi_bonus REAL, "
     "phi REAL, tau_adx REAL, omega_vol REAL, "
     "bias_pct REAL, rsi REAL, adx REAL, "
-    "ndx_actual_open REAL, "             # T日纳指100实际开盘
-    "ndx_actual_close REAL, "            # T日纳指100实际收盘 (决定基金净值)
-    "p_est_deviation REAL, "             # P_est偏差 = (实际开-P_est)/P_est*100; 正=低估 负=高估
-    "entry_return REAL, "               # 入场日涨跌 = (T收-T-1收)/T-1收*100; 负=买到跌=划算
-    "forward_return REAL)"               # 买入后收益 = (次日收-T收)/T收*100; 正=买入后涨了
+    "ndx_actual_open REAL, ndx_actual_close REAL, "
+    "p_est_deviation REAL, entry_return REAL, forward_return REAL, "
+    "operate_time TEXT NOT NULL)"
 )
 INSERT_VALIDATION = (
     "INSERT OR REPLACE INTO validation "
     "(date, sbi, amount, r_cpo, r_nq, r_fx, vix, c_prev, p_est, "
     "base, omega_ext, omega_bias, omega_pos, rsi_bonus, "
-    "phi, tau_adx, omega_vol, bias_pct, rsi, adx) "
-    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    "phi, tau_adx, omega_vol, bias_pct, rsi, adx, operate_time) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
 )
 UPDATE_VALIDATION = (
     "UPDATE validation SET ndx_actual_open=?, ndx_actual_close=?, "
-    "p_est_deviation=?, entry_return=?, forward_return=? WHERE date=?"
+    "p_est_deviation=?, entry_return=?, forward_return=?, "
+    "operate_time=? WHERE date=?"
 )
 
+# ========== 基金净值 ==========
+CREATE_FUND = (
+    "CREATE TABLE IF NOT EXISTS fund_nav ("
+    "date TEXT PRIMARY KEY, "
+    "nav REAL NOT NULL, "
+    "daily_return REAL, "
+    "operate_time TEXT NOT NULL)"
+)
+INSERT_FUND = (
+    "INSERT OR REPLACE INTO fund_nav (date, nav, daily_return, operate_time) "
+    "VALUES (?, ?, ?, ?)"
+)
+
+
+# ========== 底层操作 ==========
 
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -80,22 +157,27 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute(CREATE_NDX)
     conn.execute(CREATE_CPO)
     conn.execute(CREATE_NQ)
-    conn.execute(CREATE_FUND)
+    conn.execute(CREATE_FX)
+    conn.execute(CREATE_VIX)
     conn.execute(CREATE_VALIDATION)
+    conn.execute(CREATE_FUND)
     conn.commit()
     return conn
 
 
-def insert_daily(date, open_, high, low, close, volume=0):
+# ========== NDX ==========
+
+def insert_daily(date, open_, high, low, close, volume=0, operate_time=None):
     conn = _get_conn()
-    conn.execute(INSERT_NDX, (date, open_, high, low, close, volume))
+    conn.execute(INSERT_NDX, (date, open_, high, low, close, volume,
+                              operate_time or _now()))
     conn.commit()
     conn.close()
 
 
 def get_all():
     conn = _get_conn()
-    df = pd.read_sql("SELECT * FROM ndx_daily ORDER BY date", conn)
+    df = pd.read_sql("SELECT date, open, high, low, close, volume FROM ndx_daily ORDER BY date", conn)
     conn.close()
     if df.empty:
         return df
@@ -110,95 +192,26 @@ def count():
     return row[0] if row else 0
 
 
-def latest():
+# ========== CPO ==========
+
+def insert_cpo_daily(date, open_, high, low, close, volume=0, amount=0.0, operate_time=None):
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT date, open, high, low, close, volume "
-        "FROM ndx_daily ORDER BY date DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
-    if not row:
-        return None
-    return dict(zip(["date", "open", "high", "low", "close", "volume"], row))
-
-
-def import_from_sina_kline(raw_data: str) -> int:
-    """从 Sina 日K线格式批量导入
-
-    格式: timestamp,date,open,close,volume,high,low,--,change,change%,--,ma5,ma10,vol_ma10,...
-    记录间用分号分隔
-
-    Returns:
-        导入行数
-    """
-    conn = _get_conn()
-    n = 0
-
-    for record in raw_data.split(";"):
-        record = record.strip()
-        if not record:
-            continue
-        fields = record.split(",")
-        if len(fields) < 7:
-            continue
-
-        try:
-            date = fields[1]
-            op = float(fields[2])
-            cl = float(fields[3])
-            vol = int(float(fields[4]))
-            hi = float(fields[5])
-            lo = float(fields[6])
-
-            if date and op > 0 and cl > 0:
-                conn.execute(INSERT_NDX, (date, op, hi, lo, cl, vol))
-                n += 1
-        except (ValueError, IndexError):
-            continue
-
-    conn.commit()
-    conn.close()
-    return n
-
-
-# ---- CPO 历史 ----
-
-def insert_cpo_daily(date: str, close: float):
-    conn = _get_conn()
-    conn.execute(INSERT_CPO, (date, close))
+    conn.execute(INSERT_CPO, (date, open_, high, low, close, volume, amount,
+                              operate_time or _now()))
     conn.commit()
     conn.close()
 
 
 def get_cpo_ma20() -> tuple[float, float]:
-    """获取 CPO 的 MA20 相关值用于主跌浪判断
-
-    Returns:
-        (ma20_yesterday, ma20_5days_ago)  — 都是基于昨天收盘的数据
-        数据不足 21 天时返回 (0, 0)
-    """
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT date, close FROM cpo_daily ORDER BY date DESC LIMIT 25"
-    ).fetchall()
+    rows = conn.execute("SELECT date, close FROM cpo_daily ORDER BY date DESC LIMIT 25").fetchall()
     conn.close()
-
     if len(rows) < 21:
         return 0.0, 0.0
-
     closes = [r[1] for r in rows]
     ma20_yesterday = sum(closes[1:21]) / 20
     ma20_5days_ago = sum(closes[5:25]) / 20 if len(closes) >= 25 else 0.0
     return ma20_yesterday, ma20_5days_ago
-
-
-def get_cpo_latest_close() -> Optional[float]:
-    conn = _get_conn()
-    row = conn.execute(
-        "SELECT close FROM cpo_daily ORDER BY date DESC LIMIT 1"
-    ).fetchone()
-    conn.close()
-    return row[0] if row else None
 
 
 def cpo_count() -> int:
@@ -208,65 +221,80 @@ def cpo_count() -> int:
     return row[0] if row else 0
 
 
-# ---- NQ 期货历史 ----
+# ========== NQ ==========
 
-def insert_nq_daily(date: str, close: float):
+def insert_nq_daily(date, open_, high, low, close, operate_time=None,
+                     is_final=1):
     conn = _get_conn()
-    conn.execute(INSERT_NQ, (date, close))
+    conn.execute(INSERT_NQ, (date, open_, high, low, close,
+                              operate_time or _now(), is_final))
     conn.commit()
     conn.close()
 
 
-def get_nq_last_two() -> list[float]:
-    """获取 NQ 最近两天的收盘价，用于周末计算周五涨跌幅"""
+def insert_fx_daily(date, close, operate_time=None, is_final=1):
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT close FROM nq_daily ORDER BY date DESC LIMIT 2"
-    ).fetchall()
+    conn.execute(INSERT_FX, (date, close, operate_time or _now(), is_final))
+    conn.commit()
     conn.close()
-    return [r[0] for r in rows]
 
 
-def get_nq_prev_close() -> float:
-    """获取最近一次保存的 NQ 期货收盘价（用于计算 R_NQ）"""
+def has_final_record(table: str, date: str) -> bool:
+    """检查某表某日期是否已有 is_final=1 的记录"""
     conn = _get_conn()
     row = conn.execute(
-        "SELECT close FROM nq_daily ORDER BY date DESC LIMIT 1"
+        f"SELECT 1 FROM {table} WHERE date = ? AND is_final = 1",
+        (date,)
+    ).fetchone()
+    conn.close()
+    return row is not None
+
+
+def get_fx_prev_close() -> float:
+    """最近交易日 FX 收盘价（is_final=1, date < today → 周一→周五）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT close FROM fx_daily "
+        "WHERE date < ? AND is_final = 1 ORDER BY date DESC LIMIT 1",
+        (today,)
     ).fetchone()
     conn.close()
     return row[0] if row else 0.0
 
 
-# 基金净值表 — 手动录入，作为验证基准
-CREATE_FUND = (
-    "CREATE TABLE IF NOT EXISTS fund_nav ("
-    "date TEXT PRIMARY KEY, "
-    "nav REAL NOT NULL,"
-    "daily_return REAL)"
-)
-INSERT_FUND = "INSERT OR REPLACE INTO fund_nav (date, nav, daily_return) VALUES (?, ?, ?)"
-
-
-def insert_fund_nav(date: str, nav: float, daily_return: float = 0):
+def insert_vix_daily(date, open_, high, low, close, operate_time=None,
+                      is_final=1):
     conn = _get_conn()
-    conn.execute(INSERT_FUND, (date, nav, daily_return))
+    conn.execute(INSERT_VIX, (date, open_, high, low, close,
+                               operate_time or _now(), is_final))
     conn.commit()
     conn.close()
 
 
-def get_fund_navs() -> list[dict]:
+def get_nq_last_two() -> list[float]:
     conn = _get_conn()
-    rows = conn.execute(
-        "SELECT date, nav, daily_return FROM fund_nav ORDER BY date"
-    ).fetchall()
+    rows = conn.execute("SELECT close FROM nq_daily ORDER BY date DESC LIMIT 2").fetchall()
     conn.close()
-    return [{"date": r[0], "nav": r[1], "daily_return": r[2]} for r in rows]
+    return [r[0] for r in rows]
 
 
-# ---- 验证记录 ----
+def get_nq_prev_close() -> float:
+    """最近交易日 NQ 收盘价（is_final=1, date < today → 周一→周五）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT close FROM nq_daily "
+        "WHERE date < ? AND is_final = 1 ORDER BY date DESC LIMIT 1",
+        (today,)
+    ).fetchone()
+    conn.close()
+    return row[0] if row else 0.0
+
+
+# ========== Validation ==========
 
 def save_validation(date: str, result) -> None:
-    """保存每日模型输出到验证表"""
     conn = _get_conn()
     conn.execute(INSERT_VALIDATION, (
         date, result.sbi, result.recommended_amount,
@@ -277,23 +305,13 @@ def save_validation(date: str, result) -> None:
         result.alpha.omega_pos, result.alpha.rsi_bonus,
         result.tech.phi, result.tech.tau_adx, result.tech.omega_vol,
         result.alpha.bias_pct, result.indicators.rsi, result.indicators.adx,
+        _now(),
     ))
     conn.commit()
     conn.close()
 
 
 def update_actual(date: str, actual_open: float, actual_close: float) -> None:
-    """补录 T 日纳指100实际开盘/收盘
-
-    计算:
-      p_est_deviation = (实际开 - P_est) / P_est * 100
-        正数 = 实际开盘 > 预估 → P_est 低估了
-        负数 = 实际开盘 < 预估 → P_est 高估了
-      entry_return = (T日收 - T-1日收) / T-1日收 * 100
-        入场日涨跌: 负=买到跌(划算), 正=买到涨(买贵了)
-      forward_return = (T+1日收 - T日收) / T日收 * 100
-        买入后涨跌: 正=买入后涨了(赚了), 负=买入后跌了
-    """
     prev = _get_validation_row(date)
     if not prev:
         return
@@ -302,27 +320,23 @@ def update_actual(date: str, actual_open: float, actual_close: float) -> None:
     deviation = ((actual_open - p_est) / p_est * 100) if p_est > 0 else 0
     entry_ret = ((actual_close - c_prev) / c_prev * 100) if c_prev > 0 else 0
 
-    # forward_return: 查次日收盘
     conn = _get_conn()
     next_row = conn.execute(
-        "SELECT close FROM ndx_daily WHERE date > ? ORDER BY date LIMIT 1",
-        (date,)
+        "SELECT close FROM ndx_daily WHERE date > ? ORDER BY date LIMIT 1", (date,)
     ).fetchone()
     fwd_ret = 0.0
     if next_row and actual_close > 0:
-        next_close = next_row[0]
-        fwd_ret = ((next_close - actual_close) / actual_close * 100)
+        fwd_ret = ((next_row[0] - actual_close) / actual_close * 100)
 
     conn.execute(UPDATE_VALIDATION, (
         actual_open, actual_close,
         round(deviation, 2), round(entry_ret, 2), round(fwd_ret, 2),
-        date))
+        _now(), date))
     conn.commit()
     conn.close()
 
 
 def get_pending_validations() -> list[dict]:
-    """获取尚未补录实际数据的记录"""
     conn = _get_conn()
     rows = conn.execute(
         "SELECT date, p_est, c_prev FROM validation "
@@ -332,17 +346,14 @@ def get_pending_validations() -> list[dict]:
     return [{"date": r[0], "p_est": r[1], "c_prev": r[2]} for r in rows]
 
 
-def _get_validation_row(date: str) -> dict | None:
+def _get_validation_row(date: str):
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT p_est, c_prev FROM validation WHERE date=?", (date,)
-    ).fetchone()
+    row = conn.execute("SELECT p_est, c_prev FROM validation WHERE date=?", (date,)).fetchone()
     conn.close()
     return {"p_est": row[0], "c_prev": row[1]} if row else None
 
 
 def get_validation_stats() -> dict:
-    """汇总验证统计"""
     conn = _get_conn()
     rows = conn.execute(
         "SELECT p_est_deviation, entry_return, forward_return, sbi, "
@@ -360,21 +371,14 @@ def get_validation_stats() -> dict:
 
     details = []
     for r in rows:
-        detail = {
-            "date": r[8],
-            "p_est": r[4], "actual_open": r[5],
+        details.append({
+            "date": r[8], "p_est": r[4], "actual_open": r[5],
             "c_prev": r[6], "actual_close": r[7],
             "deviation": r[0], "entry_return": r[1],
             "forward_return": r[2], "sbi": r[3],
-        }
-        # 计算过程文案
-        detail["deviation_calc"] = (
-            f"({r[5]:.1f} - {r[4]:.1f}) / {r[4]:.1f} * 100 = {r[0]:+.2f}%"
-        )
-        detail["entry_calc"] = (
-            f"({r[7]:.1f} - {r[6]:.1f}) / {r[6]:.1f} * 100 = {r[1]:+.2f}%"
-        )
-        details.append(detail)
+            "deviation_calc": f"({r[5]:.1f} - {r[4]:.1f}) / {r[4]:.1f} * 100 = {r[0]:+.2f}%",
+            "entry_calc": f"({r[7]:.1f} - {r[6]:.1f}) / {r[6]:.1f} * 100 = {r[1]:+.2f}%",
+        })
 
     buckets = {"low": [], "mid": [], "high": []}
     for s, ret in zip(sbis, entry_rets):
@@ -388,33 +392,63 @@ def get_validation_stats() -> dict:
         "p_est_bias": sum(deviations) / len(deviations),
         "avg_entry_return": sum(entry_rets) / len(entry_rets),
         "avg_forward_return": sum(fwd_rets) / len(fwd_rets) if fwd_rets else 0,
-        "sbi_buckets": {
-            k: {"count": len(v), "avg_return": sum(v)/len(v) if v else 0}
-            for k, v in buckets.items()
-        },
+        "sbi_buckets": {k: {"count": len(v), "avg_return": sum(v)/len(v) if v else 0}
+                        for k, v in buckets.items()},
         "details": details,
     }
 
 
-# ---- CSV 导入 ----
+# ========== Fund NAV ==========
 
-def import_csv(csv_path):
-    """从 CSV 导入历史数据
+def insert_fund_nav(date: str, nav: float, daily_return: float = 0):
+    conn = _get_conn()
+    conn.execute(INSERT_FUND, (date, nav, daily_return, _now()))
+    conn.commit()
+    conn.close()
 
-    支持两种 CSV 格式:
-      1. date,open,high,low,close,volume
-      2. 日期,开盘,最高,最低,收盘,成交量 (东方财富格式)
 
-    Returns:
-        导入行数
-    """
-    csv_path = Path(csv_path)
-    if not csv_path.exists():
-        raise FileNotFoundError(f"CSV 文件不存在: {csv_path}")
+def get_fund_navs() -> list[dict]:
+    conn = _get_conn()
+    rows = conn.execute("SELECT date, nav, daily_return FROM fund_nav ORDER BY date").fetchall()
+    conn.close()
+    return [{"date": r[0], "nav": r[1], "daily_return": r[2]} for r in rows]
 
+
+# ========== Import ==========
+
+def import_from_sina_kline(raw_data: str) -> int:
     conn = _get_conn()
     n = 0
+    for record in raw_data.split(";"):
+        record = record.strip()
+        if not record:
+            continue
+        fields = record.split(",")
+        if len(fields) < 7:
+            continue
+        try:
+            date = fields[1]
+            op = float(fields[2])
+            cl = float(fields[3])
+            vol = int(float(fields[4]))
+            hi = float(fields[5])
+            lo = float(fields[6])
+            if date and op > 0 and cl > 0:
+                conn.execute(INSERT_NDX, (date, op, hi, lo, cl, vol, _now()))
+                n += 1
+        except (ValueError, IndexError):
+            continue
+    conn.commit()
+    conn.close()
+    return n
 
+
+def import_csv(csv_path):
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        raise FileNotFoundError(f"CSV file not found: {csv_path}")
+    conn = _get_conn()
+    n = 0
     with open(csv_path, "r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -424,11 +458,9 @@ def import_csv(csv_path):
             lo = float(row.get("low") or row.get("最低", 0))
             cl = float(row.get("close") or row.get("收盘", 0))
             vol = int(float(row.get("volume") or row.get("成交量", 0)))
-
             if date and op > 0 and cl > 0:
-                conn.execute(INSERT_NDX, (date, op, hi, lo, cl, vol))
+                conn.execute(INSERT_NDX, (date, op, hi, lo, cl, vol, _now()))
                 n += 1
-
     conn.commit()
     conn.close()
     return n
