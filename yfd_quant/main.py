@@ -185,9 +185,16 @@ def main():
         # 1. 保存 NQ 期货收盘价
         if s.nq_future > 0:
             insert_nq_daily(today, s.nq_future)
-            print(f"[1/2] NQ 期货收盘价已保存: {s.nq_future:.2f}")
+            print(f"[1/3] NQ 期货收盘: {s.nq_future:.2f}")
 
-        # 2. 自动补录昨日 validation（只补最近一条，防止跨天错位）
+        # 2. 保存 NDX 纳指100日线 OHLC（gb_ndx: [5]开 [6]高 [7]低 [1]收）
+        if s.ndx_open > 0 and s.ndx_price > 0:
+            from yfd_quant.data.db import insert_daily
+            insert_daily(s.ndx_time[:10], s.ndx_open, s.ndx_high,
+                         s.ndx_low, s.ndx_price)
+            print(f"[2/3] NDX 日线: {s.ndx_time[:10]} O={s.ndx_open:.1f} H={s.ndx_high:.1f} L={s.ndx_low:.1f} C={s.ndx_price:.1f}")
+
+        # 3. 自动补录昨日 validation（只补最近一条，防止跨天错位）
         pending = get_pending_validations()
         msg_parts = []
         if pending and s.ndx_open > 0 and s.ndx_price > 0:
@@ -195,7 +202,7 @@ def main():
             latest_pending = pending[-1]  # 按日期排序，最后一条是最新的
             update_actual(latest_pending["date"], s.ndx_open, s.ndx_price)
             msg = f"{latest_pending['date']}: 开={s.ndx_open:.1f} 收={s.ndx_price:.1f}"
-            print(f"[2/2] 已补录 {msg}")
+            print(f"[3/3] 已补录 {msg}")
             msg_parts.append(msg)
             # 如果还有更早的未补录，提示用户手动处理
             if len(pending) > 1:
@@ -203,9 +210,9 @@ def main():
                 print(f"[!] 尚有 {len(old_dates)} 条断档未补: {old_dates}")
                 print(f"    如需补录: python -m yfd_quant.main --backfill-actual 日期,开盘,收盘")
         elif pending:
-            print(f"[2/2] 跳过补录 ({len(pending)}条待补录，gb_ndx数据不可用)")
+            print(f"[3/3] 跳过补录 ({len(pending)}条待补录)")
 
-        # 3. 推送通知（含检验统计）
+        # 推送通知（含检验统计）
         wc = config.get("notify", {}).get("wecom_webhook", "")
         if wc:
             stats_text = build_stats_text()

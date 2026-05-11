@@ -361,7 +361,7 @@ def get_validation_stats() -> dict:
     details = []
     for r in rows:
         detail = {
-            "date": r[9],
+            "date": r[8],
             "p_est": r[4], "actual_open": r[5],
             "c_prev": r[6], "actual_close": r[7],
             "deviation": r[0], "entry_return": r[1],
