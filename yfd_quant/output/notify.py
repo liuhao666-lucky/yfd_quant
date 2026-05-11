@@ -57,10 +57,11 @@ def send_model_result(result: ModelResult, webhook_url: str) -> bool:
     if alpha.omega_ext > 0:
         bias_msg = f"\n  <font color=\"warning\">（血洗日触发，乖离率互斥关闭）</font>"
     elif alpha.omega_bias > 0:
-        direction = "超卖" if alpha.bias_pct < 0 else "强势突破"
-        bias_msg = f"\n  <font color=\"comment\">（偏离均线 {bias_val:.1f}%，属于{direction}，额外+{alpha.omega_bias:.1f}分）</font>"
+        bias_msg = f"\n  <font color=\"comment\">（向下偏离均线 {bias_val:.1f}%，超卖反弹奖励+{alpha.omega_bias:.1f}分）</font>"
+    elif alpha.bias_pct > 0:
+        bias_msg = f"\n  <font color=\"comment\">（向上偏离 {bias_val:.1f}%，不追高，不加分）</font>"
     else:
-        bias_msg = f"\n  <font color=\"comment\">（乖离率 {bias_val:.1f}%，未超 2.5% 阈值，不加分）</font>"
+        bias_msg = f"\n  <font color=\"comment\">（乖离率 {bias_val:.1f}%，未触发超卖阈值 -2.5%，不加分）</font>"
 
     # RSI 互斥说明
     rsi_msg = ""

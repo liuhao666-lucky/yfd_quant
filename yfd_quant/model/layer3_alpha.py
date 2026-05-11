@@ -50,10 +50,10 @@ def omega_extreme(r_cpo: float, r_nq: float) -> float:
 
 
 def omega_bias(p_est: float, ma20: float, omega_ext: float = 0.0) -> tuple[float, float]:
-    """3.3 双向乖离率补偿 Ω_BIAS
+    """3.3 单向乖离率补偿 — 只捡超卖的皮筋
 
-    与 Ω_EXT 互斥: 只有在 omega_ext == 0 时才生效。
-    偏离 MA20 超过 ±2.5% 时给予 8 倍乖离幅度的奖励。
+    与 Ω_EXT 互斥，且仅向下偏离（BIAS ≤ -2.5%）时才奖励。
+    向上偏离直接为 0，杜绝追高。
 
     Returns:
         (omega_bias, bias_pct)
@@ -66,9 +66,9 @@ def omega_bias(p_est: float, ma20: float, omega_ext: float = 0.0) -> tuple[float
     if omega_ext > 0:
         return 0.0, bias_pct
 
-    abs_bias = abs(bias_pct)
-    if abs_bias >= 2.5:
-        return round(8.0 * abs_bias, 2), bias_pct
+    # 单向：仅 BIAS ≤ -2.5%（超卖）给予 8×|BIAS| 奖励
+    if bias_pct <= -2.5:
+        return round(8.0 * abs(bias_pct), 2), bias_pct
     return 0.0, bias_pct
 
 
