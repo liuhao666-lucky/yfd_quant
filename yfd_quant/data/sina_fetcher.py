@@ -24,13 +24,14 @@ HEADERS = {"Referer": "https://finance.sina.com.cn"}
 class SinaData:
     """一次批量请求获取的全部市场数据"""
     # 纳指100 (gb_ndx)
-    ndx_price: float = 0.0       # 最新价
-    ndx_change_pct: float = 0.0  # 涨跌幅%
-    ndx_open: float = 0.0        # 今开
-    ndx_high: float = 0.0        # 最高
-    ndx_low: float = 0.0         # 最低
-    ndx_prev_close: float = 0.0  # 昨收 (fields[26])
-    ndx_time: str = ""
+    ndx_price: float = 0.0       # 最新价 [1]
+    ndx_change_pct: float = 0.0  # 涨跌幅% [2]
+    ndx_open: float = 0.0        # 今开 [5]
+    ndx_high: float = 0.0        # 最高 [6]
+    ndx_low: float = 0.0         # 最低 [7]
+    ndx_volume: int = 0          # 成交量 [10]
+    ndx_prev_close: float = 0.0  # 昨收 [26]
+    ndx_time: str = ""           # 时间 [3]
 
     # CPO概念 (gn0701159)
     cpo_price: float = 0.0       # 最新点位
@@ -99,6 +100,7 @@ def fetch_all() -> SinaData:
         data.ndx_open = float(f[5])
         data.ndx_high = float(f[6])
         data.ndx_low = float(f[7])
+        data.ndx_volume = int(float(f[10])) if len(f) > 10 and f[10] else 0
         data.ndx_prev_close = float(f[26])
         data.ndx_time = f[3]
     except (SinaError, (ValueError, IndexError)) as e:

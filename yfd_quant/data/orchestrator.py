@@ -74,7 +74,8 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
     if not weekend:
         if sina.ndx_open > 0 and sina.ndx_price > 0:
             insert_daily(sina.ndx_time[:10], sina.ndx_open,
-                         sina.ndx_high, sina.ndx_low, sina.ndx_price)
+                         sina.ndx_high, sina.ndx_low, sina.ndx_price,
+                         sina.ndx_volume)
 
         if sina.cpo_price > 0 and sina.cpo_date:
             insert_cpo_daily(sina.cpo_date, sina.cpo_price)

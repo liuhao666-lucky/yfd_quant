@@ -187,12 +187,12 @@ def main():
             insert_nq_daily(today, s.nq_future)
             print(f"[1/3] NQ 期货收盘: {s.nq_future:.2f}")
 
-        # 2. 保存 NDX 纳指100日线 OHLC（gb_ndx: [5]开 [6]高 [7]低 [1]收）
+        # 2. 保存 NDX 纳指100日线 OHLCV（gb_ndx: [5]O [6]H [7]L [1]C [10]V）
         if s.ndx_open > 0 and s.ndx_price > 0:
             from yfd_quant.data.db import insert_daily
             insert_daily(s.ndx_time[:10], s.ndx_open, s.ndx_high,
-                         s.ndx_low, s.ndx_price)
-            print(f"[2/3] NDX 日线: {s.ndx_time[:10]} O={s.ndx_open:.1f} H={s.ndx_high:.1f} L={s.ndx_low:.1f} C={s.ndx_price:.1f}")
+                         s.ndx_low, s.ndx_price, s.ndx_volume)
+            print(f"[2/3] NDX 日线: {s.ndx_time[:10]} O={s.ndx_open:.1f} H={s.ndx_high:.1f} L={s.ndx_low:.1f} C={s.ndx_price:.1f} V={s.ndx_volume}")
 
         # 3. 自动补录昨日 validation（只补最近一条，防止跨天错位）
         pending = get_pending_validations()
