@@ -25,6 +25,7 @@ from yfd_quant.data.db import (
 from yfd_quant.model.engine import QuantEngine
 from yfd_quant.output.console import render as console_render, render_debug
 from yfd_quant.output.json_writer import write_single, append_history
+from yfd_quant.fund_info import get_latest_nav
 from yfd_quant.output.notify import (
     send_model_result, send_capture_result, send_error_notify,
 )
@@ -261,7 +262,17 @@ def main():
         elif pending:
             print(f"[4/4] 跳过补录 ({len(pending)}条待补录)")
 
-        # 推送通知
+        # 6. 基金净值（自动从接口获取）
+        try:
+            nav_data = get_latest_nav(config.get("fund_code", "012922"))
+            if nav_data:
+                insert_fund_nav(nav_data["date"], nav_data["nav"],
+                                nav_data["daily_return"])
+                print(f"[6] 基金净值: {nav_data['date']} NAV={nav_data['nav']:.4f}")
+        except Exception as e:
+            print(f"[6] 基金净值获取失败: {e}")
+
+        # 推送
         wc = config.get("notify", {}).get("wecom_webhook", "")
         if wc:
             ok = send_capture_result(s, msg_parts, wc)

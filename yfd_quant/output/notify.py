@@ -77,21 +77,53 @@ def send_model_result(result: ModelResult, webhook_url: str) -> bool:
     else:
         adx_note = f"ADX={result.indicators.adx:.1f} 正常，不打折"
 
+    # 基金净值近5日
+    nav_lines = ""
+    vol_warning = ""
+    try:
+        from yfd_quant.data.db import get_fund_navs
+        navs = get_fund_navs()
+        if navs:
+            nav_lines = "**📊 近5日净值**\n"
+            for n in navs[-5:]:
+                arrow = "📈" if n["daily_return"] > 0 else ("📉" if n["daily_return"] < 0 else "➖")
+                nav_lines += f"- {n['date']} 净值 {n['nav']:.4f} {arrow} {n['daily_return']:+.2%}\n"
+            # 波动预警
+            latest_ret = abs(navs[-1]["daily_return"])
+            if latest_ret > 0.05:
+                vol_warning = "\n⚠️ **近期波动剧烈（日涨跌超5%），请勿追涨杀跌，严格按模型纪律操作**\n"
+    except Exception:
+        pass
+
+    # 权重版本
+    try:
+        from yfd_quant.config import load_config
+        cfg = load_config()
+        weight_ver = cfg.get("weight_version", "v3.0")
+    except Exception:
+        weight_ver = "v3.0"
+
+    # SOX 费城半导体
+    sox_line = ""
+    if hasattr(result, "sox_change_pct") and result.sox_change_pct:
+        sox_line = f"- 费城半导体 SOX：{result.sox_change_pct:+.2f}%（参考）\n"
+
     content = f"""# 易方达全球成长精选（012922）量化决策
 > 理念：不预测涨跌，只对"恐慌与贪婪"做数学反应
-> 今日申购窗口：{action}
+> 今日申购窗口：{action} | 权重版本：{weight_ver}
 
 ---
 **🧮 最终得分：{sbi}/100**
 **💰 建议投入：{amount:.2f} 元**
-
+{vol_warning}
 ---
+{nav_lines}
 **🌍 底层资产吸引力**（涨跌幅→0~100分，跌越多分越高=越便宜）
-- A股光模块（35%）：{result.r_cpo:+.2f}% → {_ac(f_cpo)}（{f_cpo:.0f}分）
+- A股光模块（25%）：{result.r_cpo:+.2f}% → {_ac(f_cpo)}（{f_cpo:.0f}分）
   <font color="comment">主跌浪折扣：{'已触发，打8折' if l1['tau_cpo']==0.8 else '未触发'}</font>
-- 纳指期货（55%）：{result.r_nq:+.2f}% → {_ac(f_nq)}（{f_nq:.0f}分）
+- 纳指期货（65%）：{result.r_nq:+.2f}% → {_ac(f_nq)}（{f_nq:.0f}分）
 - 人民币汇率（10%）：{result.r_fx:+.2f}% → {_ac(f_fx)}（{f_fx:.0f}分）
-
+{sox_line}
 **🦅 聪明钱提前反应**
 - 预估今晚开盘 P_est={result.p_est:.1f}（昨收{result.ndx_close_prev:.1f}×期货变化）
   <font color="comment">{bias_note}</font>

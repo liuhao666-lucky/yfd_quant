@@ -111,7 +111,7 @@ def render_debug(result: ModelResult) -> None:
 
     console.print(f"  [bold]模块二: 底仓[/bold]")
     console.print(f"    tau_CPO = {l1['tau_cpo']} {'(主跌浪折扣)' if l1['tau_cpo'] == 0.8 else ''}")
-    console.print(f"    Base = 0.35*({l1['f_cpo']:.1f}*{l1['tau_cpo']}) + 0.55*{l1['f_nq']:.1f} + 0.10*{l1['f_fx']:.1f}")
+    console.print(f"    Base = 0.25*({l1['f_cpo']:.1f}*{l1['tau_cpo']}) + 0.65*{l1['f_nq']:.1f} + 0.10*{l1['f_fx']:.1f}")
     console.print(f"         = {result.layer2_base:.2f}")
 
     console.print(f"  [bold]模块三: Alpha 补偿[/bold]")

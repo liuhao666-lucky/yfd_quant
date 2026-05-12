@@ -3,7 +3,9 @@
     "allow": [
       "Bash(python -m pytest yfd_quant/tests/ -q)",
       "Bash(python -c ' *)",
-      "Bash(python -m yfd_quant.main --debug)"
+      "Bash(python -m yfd_quant.main --debug)",
+      "Bash(python -m yfd_quant.fund_info --show-holdings)",
+      "Bash(python -m yfd_quant.backtest -M 20 --min 0)"
     ]
   }
 }

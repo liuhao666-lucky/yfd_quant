@@ -77,22 +77,12 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
     # ---- 计算 R_NQ（必须在存入今日 NQ 之前）----
     r_nq = _calc_r_nq(sina)
 
-    # ---- 存入 SQLite（工作日；is_final=0 = 盘中暂存, 次日05:15覆盖为 is_final=1） ----
+    # ---- NQ/FX/VIX: 14:50 盘中写入 is_final=0, 次日 05:15 覆盖为 is_final=1 ----
+    # NDX/CPO 收盘数据由 --capture-nq 在 05:15 统一写入，此处不写（14:50 数据不准确）
     if not weekend:
         op_time = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         trading_date = get_us_equity_trade_date(timestamp, is_close_mode=False)
 
-        if sina.ndx_open > 0 and sina.ndx_price > 0:
-            insert_daily(trading_date, sina.ndx_open,
-                         sina.ndx_high, sina.ndx_low, sina.ndx_price,
-                         sina.ndx_volume, op_time)
-
-        if sina.cpo_price > 0:
-            insert_cpo_daily(trading_date, sina.cpo_open, sina.cpo_high,
-                             sina.cpo_low, sina.cpo_price, sina.cpo_volume,
-                             sina.cpo_amount, op_time)
-
-        # NQ/FX/VIX: 仅当交易日尚无 is_final=1 记录时才写 is_final=0
         if sina.nq_price > 0 and not has_final_record("nq_daily", trading_date):
             insert_nq_daily(trading_date, sina.nq_open, sina.nq_high,
                             sina.nq_low, sina.nq_price, op_time, is_final=0)

@@ -134,23 +134,23 @@ def test_layer2():
     tau = 1.0  # 无主跌浪折扣
 
     base = compute_base(f_cpo, tau, f_nq, f_fx)
-    expected = 0.35 * 74.0 + 0.55 * 63.0 + 0.10 * 47.6  # = 25.9+34.65+4.76 = 65.31
+    expected = 0.25 * 74.0 + 0.65 * 63.0 + 0.10 * 47.6  # = 25.9+34.65+4.76 = 64.21
     # 等等... 不对。让我重新算：
-    # 0.35*74 = 25.9, 0.55*63 = 34.65, 0.10*47.6 = 4.76
-    # Sum = 65.31
+    # 0.25*74 = 25.9, 0.65*63 = 34.65, 0.10*47.6 = 4.76
+    # Sum = 64.21
     # 但参考 HTML 里 Base 应该是 56.41...
     # 让我再算：50 - 20*(-1.2) = 50 + 24 = 74 ✓
     # 50 - 20*(-0.65) = 50 + 13 = 63 ✓
     # 50 - 20*(0.12) = 50 - 2.4 = 47.6 ✓
-    # 0.35*74 + 0.55*63 + 0.10*47.6 = 25.9 + 34.65 + 4.76 = 65.31
+    # 0.25*74 + 0.65*63 + 0.10*47.6 = 25.9 + 34.65 + 4.76 = 64.21
     # Hmm, 但 HTML 里 Base=56.41...
     # 让我检查 HTML 有没有 CPO discount 默认是 checked...
-    assert abs(base - 65.31) < 0.01
+    assert abs(base - 64.21) < 0.01
 
     # 带仓位折扣
     base_disc = compute_base(f_cpo, 0.8, f_nq, f_fx)
-    expected_disc = 0.35 * 74.0 * 0.8 + 0.55 * 63.0 + 0.10 * 47.6  # 20.72+34.65+4.76=60.13
-    assert abs(base_disc - 60.13) < 0.01
+    expected_disc = 0.25 * 74.0 * 0.8 + 0.65 * 63.0 + 0.10 * 47.6  # 20.72+34.65+4.76=60.51
+    assert abs(base_disc - 60.51) < 0.01
 
 
 def test_layer3():
@@ -246,7 +246,7 @@ def test_layer5_layer6():
     f_cpo = attraction_score(r["R_CPO"])  # 74.0
     f_nq = attraction_score(r["R_NQ"])    # 63.0
     f_fx = attraction_score(r["R_FX"])    # 47.6
-    base = compute_base(f_cpo, 1.0, f_nq, f_fx)  # 65.31
+    base = compute_base(f_cpo, 1.0, f_nq, f_fx)  # 64.21
 
     alpha = compute_alpha(r["R_CPO"], r["R_NQ"], r["C_prev"],
                           r["MA20"], r["high52w"], r["low52w"], r["RSI"])
@@ -259,8 +259,8 @@ def test_layer5_layer6():
         alpha.rsi_bonus, tech.phi, tech.tau_adx, tech.omega_vol,
     )
 
-    # base=65.31, all alpha=0 (no crash, no bias, pos>20%, RSI>30)
-    # raw = 65.31 * 1.846 * 1.0 * 1.0 = 120.6 → clamp to 100
+    # base=64.21, all alpha=0 (no crash, no bias, pos>20%, RSI>30)
+    # raw = 64.21 * 1.846 * 1.0 * 1.0 = 120.6 → clamp to 100
     # So SBI should be clamped to 100.
     # Hmm wait, this doesn't match the HTML's "54.2" output at all.
     #
