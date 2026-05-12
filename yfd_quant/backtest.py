@@ -29,7 +29,7 @@ def load_historical_data():
 
     conn = _get_conn()
     tables = {
-        "cpo": "SELECT date, open, high, low, close, volume FROM cpo_daily ORDER BY date",
+        "cpo": "SELECT date, open, high, low, close, change_pct FROM cpo_daily ORDER BY date",
         "nq":  "SELECT date, open, high, low, close FROM nq_daily ORDER BY date",
         "vix": "SELECT date, open, high, low, close FROM vix_daily ORDER BY date",
         "fx":  "SELECT date, close FROM fx_daily ORDER BY date",
@@ -39,7 +39,7 @@ def load_historical_data():
     for name, sql in tables.items():
         df = pd.read_sql(sql, conn)
         if not df.empty:
-            df["date"] = pd.to_datetime(df["date"])
+            df["date"] = pd.to_datetime(df["date"], format="%Y-%m-%d")
             df.set_index("date", inplace=True)
         data[name] = df
     conn.close()
@@ -60,6 +60,16 @@ def _get_change(df, date):
     if prev <= 0:
         return 0.0, False
     return round((cur - prev) / prev * 100, 2), True
+
+
+def _get_cpo_change(df, date):
+    """CPO change% 直接取 change_pct 字段（csindex 接口提供）"""
+    if date not in df.index:
+        return 0.0, False
+    val = df.loc[date, "change_pct"]
+    if pd.isna(val):
+        return 0.0, False
+    return float(val), True
 
 
 def _get_change_fx(df, date):
@@ -121,8 +131,8 @@ def run_backtest(M=20.0, M_min=0.0, tz_discount=0.85,
 
         ndx_close_prev = float(ndx_before["close"].iloc[-1])
 
-        # ---- 因子计算: 用当日 vs 前日 ----
-        r_cpo, cpo_ok = _get_change(cpo, date)
+        # ---- 因子计算: CPO 直接用 change_pct ----
+        r_cpo, cpo_ok = _get_cpo_change(cpo, date)
         r_nq, nq_ok = _get_change(nq, date)
         r_fx, fx_ok = _get_change_fx(fx, date)
 

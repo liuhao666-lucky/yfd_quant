@@ -59,7 +59,9 @@ def main():
     parser.add_argument("--json-only", action="store_true", help="仅输出 JSON")
     parser.add_argument("--import-csv", metavar="PATH", help="导入 NDX 历史 CSV 到 SQLite")
     parser.add_argument("--import-kline", metavar="FILE.py",
-                        help="从 Sina K线格式 Python 文件导入 (含 raw_data 字符串)")
+                        help="从 Sina K线格式 Python 文件导入")
+    parser.add_argument("--import-cpo", metavar="FILE.json",
+                        help="导入 CPO 历史数据 (中证指数 JSON)")
     parser.add_argument("--capture-nq", action="store_true",
                         help="抓取当前 NQ 期货价格存入数据库（美股收盘时运行）")
     parser.add_argument("--backfill-actual", metavar="DATE,OPEN,CLOSE",
@@ -225,11 +227,11 @@ def main():
             print(f"[{n+1}/5] NDX: {us_date} C={s.ndx_price:.1f} V={s.ndx_volume}")
             n += 1
 
-        # 3. CPO
+        # 3. CPO (中证指数)
         if s.cpo_price > 0:
-            insert_cpo_daily(cpo_date, s.cpo_open, s.cpo_high, s.cpo_low,
-                             s.cpo_price, s.cpo_volume, s.cpo_amount, op_time)
-            print(f"[{n+1}/5] CPO: {cpo_date} C={s.cpo_price:.1f}")
+            insert_cpo_daily(cpo_date, s.cpo_open, s.cpo_price, s.cpo_price,
+                             s.cpo_price, s.cpo_change, s.cpo_change_pct, op_time)
+            print(f"[{n+1}/5] CPO: {cpo_date} C={s.cpo_price:.1f} chg={s.cpo_change_pct:+.2f}%")
             n += 1
 
         # 4. FX
@@ -363,6 +365,22 @@ def main():
             n = import_from_sina_kline(mod.raw_data)
         print(f"已导入 {n} 条 NDX 历史数据")
         print(f"数据库现有 {db_count()} 条记录")
+        return
+
+    # ---- 导入 CPO 历史 ----
+    if args.import_cpo:
+        import json
+        from yfd_quant.data.db import insert_cpo_daily
+        with open(args.import_cpo, encoding="utf-8") as f:
+            data = json.load(f)
+        n = 0
+        for row in data:
+            dr = row["tradeDate"]
+            d = f"{dr[:4]}-{dr[4:6]}-{dr[6:]}"
+            insert_cpo_daily(d, row["open"], row["high"], row["low"],
+                            row["close"], row["change"], row["changePct"])
+            n += 1
+        print(f"Imported {n} CPO records")
         return
 
     # 合并 CLI 参数

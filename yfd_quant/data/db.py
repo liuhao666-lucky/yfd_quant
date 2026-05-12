@@ -51,13 +51,13 @@ CREATE_CPO = (
     "high REAL NOT NULL, "
     "low REAL NOT NULL, "
     "close REAL NOT NULL, "
-    "volume INTEGER DEFAULT 0, "
-    "amount REAL DEFAULT 0, "
+    "change REAL NOT NULL, "
+    "change_pct REAL NOT NULL, "
     "operate_time TEXT NOT NULL)"
 )
 INSERT_CPO = (
     "INSERT OR REPLACE INTO cpo_daily "
-    "(date, open, high, low, close, volume, amount, operate_time) "
+    "(date, open, high, low, close, change, change_pct, operate_time) "
     "VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
 )
 
@@ -194,9 +194,10 @@ def count():
 
 # ========== CPO ==========
 
-def insert_cpo_daily(date, open_, high, low, close, volume=0, amount=0.0, operate_time=None):
+def insert_cpo_daily(date, open_, high, low, close, change, change_pct,
+                      operate_time=None):
     conn = _get_conn()
-    conn.execute(INSERT_CPO, (date, open_, high, low, close, volume, amount,
+    conn.execute(INSERT_CPO, (date, open_, high, low, close, change, change_pct,
                               operate_time or _now()))
     conn.commit()
     conn.close()

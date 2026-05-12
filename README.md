@@ -4,6 +4,14 @@
 > 六层滤网模型，每天 14:50 告诉你该投多少钱。
 
 ---
+## ⚠️ 重要声明
+
+本模型仅为个人量化研究工具，不构成任何投资建议。
+
+- 所有输出结果（包括 SBI 分数、建议买入金额）仅代表模型基于历史数据的数学计算，不保证未来收益，也不代表市场真实走势。
+- 使用者需自行承担所有投资风险。作者不对因使用本模型产生的任何直接或间接损失负责。
+- 模型依赖的因子可能会失效，回测结果不代表实际业绩。投资前请务必独立判断，并咨询专业持牌机构。
+- 本仓库公开的代码、数据和说明仅用于交流学习，严禁用于商业用途或向他人提供付费投资建议。
 
 ## 1. 项目简介
 
@@ -57,6 +65,9 @@ notify:
 ```bash
 # 导入纳斯达克 100 日线历史（项目自带示例数据）
 python -m yfd_quant.main --import-kline ndx_history_raw.py
+
+# 导入 CPO 通信设备指数历史（项目自带示例数据）
+python -m yfd_quant.main --import-cpo cpo_history_931160.json
 ```
 
 ### 2.5 全功能测试
@@ -91,7 +102,7 @@ $$Base = 0.25 \cdot [f(R_{CPO}) \cdot \tau_{CPO}] + 0.65 \cdot f(R_{NQ}) + 0.10 
 
 | 因子 | 权重 | 数据源 | 含义 |
 |------|------|--------|------|
-| R_CPO | 25% | gn0701159 | A股光模块概念板块涨跌幅 |
+| R_CPO | 25% | 中证指数 931160 | 通信设备指数涨跌幅（csindex） |
 | R_NQ | 65% | hf_NQ | 纳指 100 期货涨跌幅 |
 | R_FX | 10% | fx_susdcnh | USDCNH 汇率涨跌幅 |
 
@@ -144,8 +155,9 @@ python -m yfd_quant.main --capture-nq
 ### 4.3 数据导入
 
 ```bash
-python -m yfd_quant.main --import-kline ndx_history_raw.py
-python -m yfd_quant.main --import-csv data.csv
+python -m yfd_quant.main --import-kline ndx_history_raw.py     # 纳指 100 历史
+python -m yfd_quant.main --import-cpo cpo_history_931160.json  # CPO 通信设备指数历史
+python -m yfd_quant.main --import-csv data.csv                 # 通用 CSV
 ```
 
 ### 4.4 基金信息查询
@@ -217,6 +229,7 @@ graph TD
     H -->|ndx_daily| I[indicators/*.py]
     I -->|MA20/RSI/ADX| D
     H -->|validation| J[--stats 检验]
+    A2[csindex.com.cn] -->|931160| B
     H -->|fund_nav| K[fund_info.py]
     K -->|基金API| L[新浪基金接口]
     
@@ -235,7 +248,7 @@ graph TD
 |----|------|----------|
 | ndx_daily | 纳指 100 日线 OHLCV | --capture-nq (05:15) |
 | nq_daily | 纳指期货 OHLC + is_final | 14:50(is_final=0) / 05:15(is_final=1) |
-| cpo_daily | A 股光模块 OHLCV | --capture-nq (05:15) |
+| cpo_daily | 通信设备指数 OHLC + change/changePct | --capture-nq (05:15) + --import-cpo |
 | vix_daily | VIX 期货 OHLC + is_final | 同上 |
 | fx_daily | USDCNH 汇率 + is_final | 同上 |
 | validation | 模型检验记录 | 14:50 自动写入，05:15 补录实际数据 |

@@ -35,16 +35,13 @@ class SinaData:
     ndx_prev_close: float = 0.0  # 昨收 [26]
     ndx_time: str = ""           # 时间 [3]
 
-    # CPO概念 (gn0701159)
-    cpo_open: float = 0.0        # 今开 [1]
-    cpo_prev_close: float = 0.0  # 昨收 [2]
-    cpo_price: float = 0.0       # 收盘 [3]
-    cpo_high: float = 0.0        # 最高 [4]
-    cpo_low: float = 0.0         # 最低 [5]
-    cpo_volume: int = 0          # 成交量 [8]
-    cpo_amount: float = 0.0      # 成交额 [9]
-    cpo_change_pct: float = 0.0  # 涨跌幅%（自算）
-    cpo_date: str = ""           # 日期 [30]
+    # CPO (中证指数 931160, 替代 Sina gn0701159)
+    cpo_open: float = 0.0        # 今开
+    cpo_prev_close: float = 0.0  # 昨收
+    cpo_price: float = 0.0       # 收盘
+    cpo_change: float = 0.0      # 涨跌额
+    cpo_change_pct: float = 0.0  # 涨跌幅%（直接用 changePct）
+    cpo_date: str = ""
     cpo_error: bool = False
 
     # VIX (hf_VX)
@@ -125,20 +122,20 @@ def fetch_all() -> SinaData:
         data.error = f"gb_ndx 解析失败: {e}"
         return data
 
+    # ---- CPO: 中证指数 931160 (替代 Sina gn0701159) ----
     try:
-        # ---- gn0701159: CPO概念 ----
-        # [1]今开 [2]昨收 [3]收盘 [4]最高 [5]最低 [8]成交量 [9]成交额 [30]日期
-        f = _parse_field(text, "gn0701159")
-        data.cpo_open = float(f[1])
-        data.cpo_prev_close = float(f[2])
-        data.cpo_price = float(f[3])
-        data.cpo_high = float(f[4])
-        data.cpo_low = float(f[5])
-        data.cpo_volume = int(float(f[8])) if len(f) > 8 and f[8] else 0
-        data.cpo_amount = float(f[9]) if len(f) > 9 and f[9] else 0.0
-        data.cpo_change_pct = _compute_change(data.cpo_price, data.cpo_prev_close)
-        data.cpo_date = f[30] if len(f) > 30 else ""
-    except SinaError:
+        from yfd_quant.data.csindex_cpo import fetch_cpo
+        cpo_raw = fetch_cpo()
+        if cpo_raw:
+            data.cpo_open = cpo_raw["open"]
+            data.cpo_prev_close = cpo_raw["prevClose"]
+            data.cpo_price = cpo_raw["close"]
+            data.cpo_change = cpo_raw["change"]
+            data.cpo_change_pct = cpo_raw["changePct"]  # 直接用接口涨跌幅
+            data.cpo_date = cpo_raw["tradeDate"]
+        else:
+            data.cpo_error = True
+    except Exception:
         data.cpo_error = True
 
     try:

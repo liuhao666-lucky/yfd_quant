@@ -187,6 +187,11 @@ def get_latest_nav(fundcode="012922") -> dict | None:
     if not nav or not navdate:
         return None
     try:
+        # Sina 返回的 navdate 是 MM-DD 格式，补全为 YYYY-MM-DD
+        if len(navdate) == 5 and "-" in navdate:
+            import datetime
+            year = str(datetime.datetime.now().year)
+            navdate = f"{year}-{navdate}"
         return {
             "date": navdate,
             "nav": float(nav),
