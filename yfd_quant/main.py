@@ -5,10 +5,15 @@
   python -m yfd_quant.main --notify            # 运行 + 推送通知
   python -m yfd_quant.main --import-csv data.csv  # 导入 NDX 历史数据
   python -m yfd_quant.main -M 100 -m 20        # 自定义金额
+  python -m yfd_quant.main --backfill-all       # 批量补录 validation 实际数据
+  python -m yfd_quant.main --capture-nq         # 抓取收盘数据(05:15定时任务)
+  python -m yfd_quant.main --stats              # 查看模型验证统计
+  python -m yfd_quant.main --recalc-snapshot 2026-05-12  # 重算快照指标
 """
 
 import argparse
 import logging
+import pandas as pd
 import sys
 from pathlib import Path
 from datetime import datetime
@@ -18,7 +23,9 @@ from yfd_quant.data.orchestrator import fetch_all, DataUnavailableError
 from yfd_quant.data.db import (
     import_csv, import_from_sina_kline, count as db_count,
     insert_nq_daily, get_nq_prev_close,
-    save_validation, update_actual, get_pending_validations,
+    save_validation, save_snapshot, get_snapshot, snapshot_to_result,
+    snapshot_to_market_snapshot, update_snapshot_derived,
+    update_actual, get_pending_validations, backfill_all_pending,
     get_validation_stats,
     insert_fund_nav, get_fund_navs,
 )
@@ -66,6 +73,10 @@ def main():
                         help="抓取当前 NQ 期货价格存入数据库（美股收盘时运行）")
     parser.add_argument("--backfill-actual", metavar="DATE,OPEN,CLOSE",
                         help="补录某日实际纳指100开盘收盘，格式: 2026-05-08,29200,29500")
+    parser.add_argument("--backfill-all", action="store_true",
+                        help="从 ndx_daily 批量补录所有缺失的 validation 实际数据")
+    parser.add_argument("--recalc-snapshot", metavar="DATE",
+                        help="重算快照表中指定日期的模型指标（手动修改输入后使用）")
     parser.add_argument("--stats", action="store_true",
                         help="显示模型验证统计")
     parser.add_argument("--update-nav", metavar="DATE,NAV,RETURN",
@@ -311,6 +322,55 @@ def main():
                 print(f"  {p['date']}: P_est={p['p_est']:.1f}")
         return
 
+    # ---- 批量补录所有缺失的 validation ----
+    if args.backfill_all:
+        filled = backfill_all_pending()
+        if filled:
+            print(f"已从 ndx_daily 补录 {len(filled)} 条: {filled}")
+        else:
+            print("无需补录（所有 validation 已有 actual 数据或 ndx_daily 无对应记录）")
+        pending = get_pending_validations()
+        if pending:
+            print(f"仍有 {len(pending)} 条因 ndx_daily 缺数据无法补录:")
+            for p in pending:
+                print(f"  {p['date']}: P_est={p['p_est']:.1f}")
+        return
+
+    # ---- 重算快照指标 ----
+    if args.recalc_snapshot:
+        from yfd_quant.data.db import get_all as get_ndx
+        date = args.recalc_snapshot.strip()
+        snap = get_snapshot(date)
+        if not snap:
+            print(f"快照表中无 {date} 的记录")
+            sys.exit(1)
+
+        # 加载 NDX 历史数据（截止到该日期）
+        ndx_df = get_ndx()
+        if ndx_df.empty:
+            print("NDX 历史数据为空")
+            sys.exit(1)
+        ndx_hist = ndx_df[ndx_df.index <= pd.Timestamp(date)]
+        if len(ndx_hist) < 200:
+            print(f"NDX 历史截止 {date} 仅 {len(ndx_hist)} 行，不足 200 行")
+            sys.exit(1)
+
+        # 重建 MarketSnapshot 并跑模型
+        ms = snapshot_to_market_snapshot(snap, ndx_hist)
+        engine = QuantEngine()
+        try:
+            result = engine.run(ms, M=snap["M"], M_min=snap["M_min"])
+        except ValueError as e:
+            print(f"模型计算失败: {e}")
+            sys.exit(1)
+
+        # 更新快照表中的计算指标
+        update_snapshot_derived(date, result)
+        print(f"已重算 {date} 快照指标: SBI={result.sbi:.1f}, Amount={result.recommended_amount:.2f}")
+        print(f"  P_est={result.p_est:.2f}, Base={result.layer2_base:.2f}")
+        print(f"  Ω_EXT={result.alpha.omega_ext}, Ω_BIAS={result.alpha.omega_bias:.2f}, Ω_POS={result.alpha.omega_pos:.2f}")
+        return
+
     # ---- 验证统计 ----
     if args.stats:
         stats = get_validation_stats()
@@ -389,60 +449,69 @@ def main():
     tz_discount = config.get("timezone_discount", 0.85)
 
     logger.info(f"参数: M={M}, M_min={M_min}")
-    logger.info(f"数据源: Sina hq.sinajs.cn 批量请求")
 
-    # ---- 抓取数据 ----
-    try:
-        snapshot, weekend = fetch_all()
-        logger.info(f"数据就绪, NDX历史: {db_count()} 天, 周末: {weekend}")
-    except DataUnavailableError as e:
-        logger.error(f"数据获取失败: {e}")
-        if args.notify:
-            send_error_notify(config.get("notify", {}).get("wecom_webhook", ""), str(e))
-        sys.exit(1)
+    # ---- 优先使用今日快照（跳过 Sina 请求和模型计算） ----
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    snap = get_snapshot(today_str)
 
-    # ---- 运行模型 ----
-    from yfd_quant.data.db import get_nq_prev_close, get_fx_prev_close
-    logger.info(f"NQ 当前={snapshot.r_nq:+.2f}% | 昨收(DB)={get_nq_prev_close():.1f}")
-    logger.info(f"FX 当前={snapshot.r_fx:+.4f}% | 昨收(DB)={get_fx_prev_close():.4f}")
+    if snap:
+        # 快照已存在，直接使用，不请求接口
+        display_result = snapshot_to_result(snap)
+        weekend = datetime.now().weekday() >= 5
+        logger.info(f"使用今日快照 (SBI={display_result.sbi}, Amount={display_result.recommended_amount})")
+    else:
+        # 无快照，正常流程：抓取数据 → 跑模型 → 存快照
+        logger.info(f"数据源: Sina hq.sinajs.cn 批量请求")
 
-    engine = QuantEngine()
-    try:
-        result = engine.run(snapshot, M=M, M_min=M_min, timezone_discount=tz_discount)
-    except ValueError as e:
-        logger.error(f"模型计算失败: {e}")
-        sys.exit(1)
+        try:
+            market_snapshot, weekend = fetch_all()
+            logger.info(f"数据就绪, NDX历史: {db_count()} 天, 周末: {weekend}")
+        except DataUnavailableError as e:
+            logger.error(f"数据获取失败: {e}")
+            if args.notify:
+                send_error_notify(config.get("notify", {}).get("wecom_webhook", ""), str(e))
+            sys.exit(1)
 
-    # ---- 输出 ----
+        from yfd_quant.data.db import get_nq_prev_close, get_fx_prev_close
+        logger.info(f"NQ 当前={market_snapshot.r_nq:+.2f}% | 昨收(DB)={get_nq_prev_close():.1f}")
+        logger.info(f"FX 当前={market_snapshot.r_fx:+.4f}% | 昨收(DB)={get_fx_prev_close():.4f}")
+
+        engine = QuantEngine()
+        try:
+            display_result = engine.run(market_snapshot, M=M, M_min=M_min, timezone_discount=tz_discount)
+        except ValueError as e:
+            logger.error(f"模型计算失败: {e}")
+            sys.exit(1)
+
+        # 写入快照（仅工作日）
+        if not weekend:
+            save_snapshot(today_str, display_result)
+
     out_cfg = config.get("output", {})
     out_dir = Path(out_cfg.get("dir", "./output"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if out_cfg.get("json", True):
         ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        write_single(result, out_dir / f"{ts}.json")
-        append_history(result, Path(out_cfg.get("history_file", "./output/history.json")))
+        write_single(display_result, out_dir / f"{ts}.json")
+        append_history(display_result, Path(out_cfg.get("history_file", "./output/history.json")))
 
     if not args.json_only:
-        console_render(result, weekend)
+        console_render(display_result, weekend)
         if args.debug:
-            render_debug(result)
+            render_debug(display_result)
     else:
         import json
         from yfd_quant.output.json_writer import result_to_dict
-        print(json.dumps(result_to_dict(result), ensure_ascii=False))
+        print(json.dumps(result_to_dict(display_result), ensure_ascii=False))
 
-    # 推送
+    # 推送（用快照数据）
     if args.notify:
         wc = config.get("notify", {}).get("wecom_webhook", "")
-        ok = send_model_result(result, wc)
+        ok = send_model_result(display_result, wc)
         logger.info(f"企业微信推送: {'成功' if ok else '失败'}")
 
-    # 验证记录（仅工作日写入，周末只看不写）
-    if not weekend:
-        save_validation(datetime.now().strftime("%Y-%m-%d"), result)
-
-    logger.info(f"完成: SBI={result.sbi}, Amount={result.recommended_amount:.2f}")
+    logger.info(f"完成: SBI={display_result.sbi}, Amount={display_result.recommended_amount:.2f}")
 
 
 if __name__ == "__main__":

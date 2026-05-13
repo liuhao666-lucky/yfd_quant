@@ -31,7 +31,7 @@ def atr(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> 
     tr = true_range(high, low, close).dropna()
 
     if len(tr) < period:
-        return float(tr.mean())
+        raise ValueError(f"ATR({period}) 需要至少 {period} 行数据，当前仅 {len(tr)} 行")
 
     # Wilder's 平滑: 初始值 = 前 14 个 TR 的均值
     vals = tr.values

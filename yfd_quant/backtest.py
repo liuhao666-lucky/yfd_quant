@@ -128,6 +128,10 @@ def run_backtest(M=20.0, M_min=0.0, tz_discount=0.85,
             skipped_reasons.append(f"{date.date()} NDX历史不足20天")
             if skip_missing:
                 continue
+        if len(ndx_before) == 0:
+            skipped += 1
+            skipped_reasons.append(f"{date.date()} NDX历史为空")
+            continue
 
         ndx_close_prev = float(ndx_before["close"].iloc[-1])
 
@@ -186,9 +190,9 @@ def run_backtest(M=20.0, M_min=0.0, tz_discount=0.85,
         try:
             result = engine.run(snapshot, M=M, M_min=M_min,
                                timezone_discount=tz_discount)
-        except (ValueError, ZeroDivisionError):
+        except (ValueError, ZeroDivisionError, KeyError, TypeError, OverflowError) as e:
             skipped += 1
-            skipped_reasons.append(f"{date.date()} 模型计算异常")
+            skipped_reasons.append(f"{date.date()} 模型计算异常: {e}")
             continue
 
         # ---- 定投模拟 ----
@@ -249,9 +253,17 @@ def compute_benchmarks(records, ndx, fund, M_min=0.0):
             fixed_return = round((f_shares * last_nav - f_cost) / f_cost * 100, 2)
 
     ndx_ret = 0.0
-    if not ndx.empty and len(ndx) >= 2:
-        ndx_ret = round((float(ndx["close"].iloc[-1]) - float(ndx["close"].iloc[0]))
-                       / float(ndx["close"].iloc[0]) * 100, 2)
+    if not ndx.empty and not records.empty:
+        start_date = pd.Timestamp(records["date"].iloc[0])
+        end_date = pd.Timestamp(records["date"].iloc[-1])
+        ndx_period = ndx[(ndx.index >= start_date) & (ndx.index <= end_date)]
+        if len(ndx_period) >= 2:
+            first_close = float(ndx_period["close"].iloc[0])
+            if first_close > 0:
+                ndx_ret = round(
+                    (float(ndx_period["close"].iloc[-1]) - first_close)
+                    / first_close * 100, 2
+                )
 
     return {
         "model_cumulative_return": round(model_return, 2),
@@ -273,18 +285,18 @@ def compute_stats(records):
     std = np.std(returns, ddof=1)
     sharpe = (avg / std * np.sqrt(252)) if std > 0 else 0
 
-    # 最大回撤: 对总市值曲线计算 (peak → trough 最大降幅)
-    mv = records["market_value"].values.astype(float)
-    if np.all(mv == 0.0) or np.all(mv == mv[0]):
+    # 最大回撤: 基于收益率曲线构造虚拟净值，排除定投资金干扰
+    virtual_nav = 1.0 + (records["pnl_pct"].values.astype(float) / 100.0)
+    if np.all(virtual_nav == virtual_nav[0]):
         max_dd = 0.0
     else:
-        peak = np.maximum.accumulate(mv)
+        peak = np.maximum.accumulate(virtual_nav)
         mask = peak > 0
         if not mask.any():
             max_dd = 0.0
         else:
             with np.errstate(divide="ignore", invalid="ignore"):
-                dd = np.where(mask, (mv - peak) / peak, 0.0)
+                dd = np.where(mask, (virtual_nav - peak) / peak, 0.0)
             max_dd = abs(float(np.nanmin(dd))) * 100
 
     wins = sum(1 for r in returns if r > 0)

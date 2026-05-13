@@ -15,7 +15,7 @@ def rsi(close: pd.Series, period: int = 14) -> float:
         最新 RSI 值 (0-100)
     """
     if len(close) < period + 1:
-        return 50.0
+        raise ValueError(f"RSI 需要至少 {period + 1} 行数据，当前仅 {len(close)} 行")
 
     delta = close.diff().dropna()
     vals = delta.values

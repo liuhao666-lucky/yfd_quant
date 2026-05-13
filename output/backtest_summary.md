@@ -8,7 +8,7 @@
 |--------|-------|
 | Model Cumulative Return | 4.79% |
 | Fixed DCA | 0.0% |
-| NDX Buy & Hold | 48.18% |
+| NDX Buy & Hold | 6.81% |
 | Total Invested | 23.76 CNY |
 | Total PnL | 1.14 CNY |
 
@@ -16,6 +16,6 @@
 | Metric | Value |
 |--------|-------|
 | Sharpe Ratio | 4.7 |
-| Max Drawdown | 0.0% |
+| Max Drawdown | 3.73% |
 | Win Rate | 75.0% |
 | Profit Factor | 0.74 |

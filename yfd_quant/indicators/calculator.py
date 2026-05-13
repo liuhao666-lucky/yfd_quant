@@ -10,6 +10,9 @@ from yfd_quant.indicators.price_extremes import get_52w_high, get_52w_low, get_m
 from yfd_quant.types import IndicatorBundle
 
 
+MIN_ROWS = 200  # MA200 需要至少 200 行数据，低于此值直接报错
+
+
 def compute_all(ndx_df: pd.DataFrame) -> IndicatorBundle:
     """从纳斯达克 100 日线数据计算全部技术指标
 
@@ -18,10 +21,25 @@ def compute_all(ndx_df: pd.DataFrame) -> IndicatorBundle:
 
     Returns:
         IndicatorBundle 包含所有指标
+
+    Raises:
+        ValueError: 数据行数不足或列缺失
     """
+    required = {"open", "high", "low", "close"}
+    missing = required - set(ndx_df.columns)
+    if missing:
+        raise ValueError(f"NDX 数据缺少必要列: {missing}")
+
+    if len(ndx_df) < MIN_ROWS:
+        raise ValueError(f"NDX 历史数据仅 {len(ndx_df)} 行，不足 {MIN_ROWS} 行，"
+                         f"MA200 等指标无法准确计算，拒绝降级运行")
+
     close = ndx_df["close"]
     high = ndx_df["high"]
     low = ndx_df["low"]
+
+    if close.isna().any() or high.isna().any() or low.isna().any():
+        raise ValueError("NDX 数据包含 NaN 值，无法计算指标")
 
     adx_val, di_plus, di_minus = calc_adx(high, low, close)
 

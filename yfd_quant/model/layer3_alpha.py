@@ -86,6 +86,7 @@ def omega_position(p_est: float, high_52w: float, low_52w: float) -> tuple[float
         return 0.0, 0.0
 
     p_pos = round(((p_est - low_52w) / price_range) * 100.0, 2)
+    p_pos = max(0.0, min(100.0, p_pos))  # 防止越界产生虚假信号
 
     if p_pos <= 20.0:
         omega = round(20.0 * (1.0 - p_pos / 20.0), 2)

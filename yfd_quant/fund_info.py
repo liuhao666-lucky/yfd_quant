@@ -83,7 +83,11 @@ def fetch_fund_detail(fundcode="012922"):
     payload = {"fundcode": fundcode, "type": "1,2,3,4,5",
                "openLoader": "true", "_": int(time.time() * 1000)}
     resp = _retry_request("POST", FUND_API_URL, session, data=payload)
-    data = resp.json()
+    try:
+        data = resp.json()
+    except (ValueError, KeyError):
+        print("接口返回非 JSON 数据")
+        return None
 
     if data.get("code") != 0:
         print(f"接口返回错误：{data.get('msg')}")
@@ -180,7 +184,9 @@ def get_latest_nav(fundcode="012922") -> dict | None:
     data = fetch_fund_detail(fundcode)
     if not data:
         return None
-    base = data["data"]["market"]["base_info"]
+    base = data.get("data", {}).get("market", {}).get("base_info", {})
+    if not base:
+        return None
     nav = base.get("netvalue")
     navdate = base.get("navdate")
     dayinc = base.get("dayincratio")
@@ -190,7 +196,9 @@ def get_latest_nav(fundcode="012922") -> dict | None:
         # Sina 返回的 navdate 是 MM-DD 格式，补全为 YYYY-MM-DD
         if len(navdate) == 5 and "-" in navdate:
             import datetime
-            year = str(datetime.datetime.now().year)
+            now = datetime.datetime.now()
+            month = int(navdate.split("-")[0])
+            year = now.year - 1 if month > now.month else now.year
             navdate = f"{year}-{navdate}"
         return {
             "date": navdate,

@@ -41,9 +41,12 @@ def result_to_dict(result: ModelResult) -> dict:
                 "tau_adx": result.tech.tau_adx,
                 "phi": result.tech.phi,
                 "gap": result.tech.gap,
+                "strong_downtrend": result.tech.strong_downtrend,
             },
             "layer5": {"raw_score": result.raw_score, "sbi": result.sbi},
         },
+        "summary": result.summary,
+        "detail": result.detail,
     }
 
 

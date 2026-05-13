@@ -16,7 +16,11 @@ def get_52w_low(low: pd.Series) -> float:
 
 
 def get_ma200(close: pd.Series) -> float:
-    """200 日均线（年线）"""
+    """200 日均线（年线）
+
+    Raises:
+        ValueError: 数据不足 200 行
+    """
     if len(close) < 200:
-        return float(close.mean())
+        raise ValueError(f"MA200 需要至少 200 行数据，当前仅 {len(close)} 行")
     return float(close.tail(200).mean())

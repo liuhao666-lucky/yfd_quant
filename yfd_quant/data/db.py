@@ -4,7 +4,8 @@
   ndx_daily   - 纳指100日线 (O/H/L/C/V)
   cpo_daily   - A股光模块收盘
   nq_daily    - 纳指期货收盘
-  validation  - 模型检验
+  snapshot    - 14:50 模型决策快照（冻结输入+输出，防回测幻觉）
+  validation  - 模型检验（实际验证数据，从 snapshot 读决策数据）
   fund_nav    - 基金净值
 
 规则: date=交易日期, operate_time=实际入库北京时间 YYYY-MM-DD HH:MM:SS
@@ -108,6 +109,37 @@ INSERT_VIX = (
     "VALUES (?, ?, ?, ?, ?, ?, ?)"
 )
 
+# ========== 快照表（14:50 模型决策冻结） ==========
+CREATE_SNAPSHOT = (
+    "CREATE TABLE IF NOT EXISTS snapshot ("
+    "date TEXT PRIMARY KEY, "
+    "r_cpo REAL, r_nq REAL, r_fx REAL, vix REAL, "
+    "ndx_close_prev REAL, "
+    "cpo_downtrend INTEGER, "
+    "sbi REAL, amount REAL, p_est REAL, base REAL, "
+    "omega_ext REAL, omega_bias REAL, omega_pos REAL, rsi_bonus REAL, "
+    "phi REAL, tau_adx REAL, omega_vol REAL, "
+    "bias_pct REAL, p_pos REAL, "
+    "raw_score REAL, gap REAL, strong_downtrend INTEGER, "
+    "M REAL, M_min REAL, "
+    "rsi REAL, adx REAL, ma20 REAL, ma200 REAL, "
+    "high_52w REAL, low_52w REAL, atr14 REAL, di_plus REAL, di_minus REAL, "
+    "f_cpo REAL, f_nq REAL, f_fx REAL, tau_cpo REAL, "
+    "operate_time TEXT NOT NULL)"
+)
+INSERT_SNAPSHOT = (
+    "INSERT OR REPLACE INTO snapshot "
+    "(date, r_cpo, r_nq, r_fx, vix, ndx_close_prev, "
+    "cpo_downtrend, "
+    "sbi, amount, p_est, base, "
+    "omega_ext, omega_bias, omega_pos, rsi_bonus, "
+    "phi, tau_adx, omega_vol, "
+    "bias_pct, p_pos, raw_score, gap, strong_downtrend, M, M_min, "
+    "rsi, adx, ma20, ma200, high_52w, low_52w, atr14, di_plus, di_minus, "
+    "f_cpo, f_nq, f_fx, tau_cpo, operate_time) "
+    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+)
+
 # ========== 验证表 ==========
 CREATE_VALIDATION = (
     "CREATE TABLE IF NOT EXISTS validation ("
@@ -151,6 +183,29 @@ INSERT_FUND = (
 
 # ========== 底层操作 ==========
 
+def _migrate_snapshot(conn: sqlite3.Connection) -> None:
+    """迁移：删除快照表中已废弃的 CPO 中间变量列"""
+    obsolete = ["cpo_close_today", "cpo_ma20_yesterday", "cpo_ma20_5days_ago"]
+    try:
+        existing = {row[1] for row in conn.execute("PRAGMA table_info(snapshot)").fetchall()}
+        for col in obsolete:
+            if col in existing:
+                conn.execute(f"ALTER TABLE snapshot DROP COLUMN {col}")
+    except Exception:
+        # ALTER TABLE DROP COLUMN 不支持时，重建表
+        rows = conn.execute("SELECT * FROM snapshot").fetchall()
+        col_names = [row[1] for row in conn.execute("PRAGMA table_info(snapshot)").fetchall()]
+        conn.execute("DROP TABLE IF EXISTS snapshot")
+        conn.execute(CREATE_SNAPSHOT)
+        if rows:
+            new_cols = [row[1] for row in conn.execute("PRAGMA table_info(snapshot)").fetchall()]
+            keep_idx = [i for i, c in enumerate(col_names) if c in new_cols]
+            for row in rows:
+                filtered = [row[i] for i in keep_idx]
+                placeholders = ",".join(["?"] * len(filtered))
+                conn.execute(f"INSERT OR REPLACE INTO snapshot VALUES ({placeholders})", filtered)
+
+
 def _get_conn() -> sqlite3.Connection:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH))
@@ -159,8 +214,11 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute(CREATE_NQ)
     conn.execute(CREATE_FX)
     conn.execute(CREATE_VIX)
+    conn.execute(CREATE_SNAPSHOT)
     conn.execute(CREATE_VALIDATION)
     conn.execute(CREATE_FUND)
+    conn.commit()
+    _migrate_snapshot(conn)
     conn.commit()
     return conn
 
@@ -293,9 +351,153 @@ def get_nq_prev_close() -> float:
     return row[0] if row else 0.0
 
 
+def get_ndx_prev_close() -> float:
+    """最近交易日 NDX 收盘价（date < today，取自 ndx_daily 表）"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT close FROM ndx_daily "
+        "WHERE date < ? ORDER BY date DESC LIMIT 1",
+        (today,)
+    ).fetchone()
+    conn.close()
+    return row[0] if row else 0.0
+
+
+# ========== Snapshot ==========
+
+def save_snapshot(date: str, result) -> None:
+    """将 14:50 模型运行的完整输入+输出冻结到快照表"""
+    l1 = result.layer1 if hasattr(result, "layer1") else {}
+    conn = _get_conn()
+    conn.execute(INSERT_SNAPSHOT, (
+        date,
+        result.r_cpo, result.r_nq, result.r_fx, result.vix,
+        result.ndx_close_prev,
+        int(result.cpo_downtrend),
+        result.sbi, result.recommended_amount, result.p_est, result.layer2_base,
+        result.alpha.omega_ext, result.alpha.omega_bias,
+        result.alpha.omega_pos, result.alpha.rsi_bonus,
+        result.tech.phi, result.tech.tau_adx, result.tech.omega_vol,
+        result.alpha.bias_pct, result.alpha.p_pos,
+        result.raw_score, result.tech.gap, int(result.tech.strong_downtrend),
+        result.M, result.M_min,
+        result.indicators.rsi, result.indicators.adx,
+        result.indicators.ma20, result.indicators.ma200,
+        result.indicators.high_52w, result.indicators.low_52w,
+        result.indicators.atr14, result.indicators.di_plus, result.indicators.di_minus,
+        l1.get("f_cpo", 0.0), l1.get("f_nq", 0.0),
+        l1.get("f_fx", 0.0), l1.get("tau_cpo", 1.0),
+        _now(),
+    ))
+    conn.commit()
+    conn.close()
+
+
+def get_snapshot(date: str) -> Optional[dict]:
+    """读取某日快照，返回 dict 或 None"""
+    conn = _get_conn()
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM snapshot WHERE date=?", (date,)).fetchone()
+    conn.close()
+    return dict(row) if row else None
+
+
+def snapshot_to_result(snap: dict):
+    """将快照 dict 转回 ModelResult，供 --notify/--debug 使用"""
+    from yfd_quant.types import (
+        ModelResult, AlphaComponents, TechComponents, IndicatorBundle,
+    )
+    from datetime import datetime as dt
+    return ModelResult(
+        timestamp=dt.strptime(snap["date"], "%Y-%m-%d"),
+        sbi=snap["sbi"],
+        recommended_amount=snap["amount"],
+        M=snap["M"], M_min=snap["M_min"],
+        r_cpo=snap["r_cpo"], r_nq=snap["r_nq"], r_fx=snap["r_fx"],
+        vix=snap["vix"],
+        ndx_close_prev=snap["ndx_close_prev"],
+        p_est=snap["p_est"],
+        cpo_downtrend=bool(snap["cpo_downtrend"]),
+        indicators=IndicatorBundle(
+            ma20=snap["ma20"], ma200=snap["ma200"],
+            high_52w=snap["high_52w"], low_52w=snap["low_52w"],
+            atr14=snap["atr14"], rsi=snap["rsi"], adx=snap["adx"],
+            di_plus=snap["di_plus"], di_minus=snap["di_minus"],
+        ),
+        layer1={"f_cpo": snap["f_cpo"], "f_nq": snap["f_nq"],
+                "f_fx": snap["f_fx"], "tau_cpo": snap["tau_cpo"]},
+        layer2_base=snap["base"],
+        alpha=AlphaComponents(
+            omega_ext=snap["omega_ext"], omega_bias=snap["omega_bias"],
+            omega_pos=snap["omega_pos"], rsi_bonus=snap["rsi_bonus"],
+            bias_pct=snap["bias_pct"], p_pos=snap["p_pos"],
+        ),
+        tech=TechComponents(
+            omega_vol=snap["omega_vol"], tau_adx=snap["tau_adx"],
+            phi=snap["phi"], gap=snap["gap"],
+            strong_downtrend=bool(snap["strong_downtrend"]),
+        ),
+        raw_score=snap["raw_score"],
+        summary="", detail="",
+    )
+
+
+def snapshot_to_market_snapshot(snap: dict, ndx_hist):
+    """将快照 dict 转回 MarketSnapshot，供 --recalc-snapshot 重跑模型用"""
+    from yfd_quant.types import MarketSnapshot
+    from datetime import datetime as dt
+    cpo_ma20_y, cpo_ma20_5d = get_cpo_ma20()
+    return MarketSnapshot(
+        timestamp=dt.strptime(snap["date"], "%Y-%m-%d"),
+        r_cpo=snap["r_cpo"], r_nq=snap["r_nq"], r_fx=snap["r_fx"],
+        cpo_close_today=0.0,
+        cpo_ma20_yesterday=cpo_ma20_y,
+        cpo_ma20_5days_ago=cpo_ma20_5d,
+        cpo_downtrend=bool(snap["cpo_downtrend"]),
+        ndx_close_prev=snap["ndx_close_prev"],
+        ndx_historical=ndx_hist,
+        vix=snap["vix"],
+    )
+
+
+def update_snapshot_derived(date: str, result) -> None:
+    """更新快照表中的模型计算指标（输入字段不变）"""
+    l1 = result.layer1 if hasattr(result, "layer1") else {}
+    conn = _get_conn()
+    conn.execute(
+        "UPDATE snapshot SET "
+        "sbi=?, amount=?, p_est=?, base=?, "
+        "omega_ext=?, omega_bias=?, omega_pos=?, rsi_bonus=?, "
+        "phi=?, tau_adx=?, omega_vol=?, "
+        "bias_pct=?, p_pos=?, raw_score=?, gap=?, strong_downtrend=?, "
+        "rsi=?, adx=?, ma20=?, ma200=?, "
+        "high_52w=?, low_52w=?, atr14=?, di_plus=?, di_minus=?, "
+        "f_cpo=?, f_nq=?, f_fx=?, tau_cpo=?, "
+        "M=?, M_min=?, operate_time=? "
+        "WHERE date=?",
+        (result.sbi, result.recommended_amount, result.p_est, result.layer2_base,
+         result.alpha.omega_ext, result.alpha.omega_bias,
+         result.alpha.omega_pos, result.alpha.rsi_bonus,
+         result.tech.phi, result.tech.tau_adx, result.tech.omega_vol,
+         result.alpha.bias_pct, result.alpha.p_pos,
+         result.raw_score, result.tech.gap, int(result.tech.strong_downtrend),
+         result.indicators.rsi, result.indicators.adx,
+         result.indicators.ma20, result.indicators.ma200,
+         result.indicators.high_52w, result.indicators.low_52w,
+         result.indicators.atr14, result.indicators.di_plus, result.indicators.di_minus,
+         l1.get("f_cpo", 0.0), l1.get("f_nq", 0.0),
+         l1.get("f_fx", 0.0), l1.get("tau_cpo", 1.0),
+         result.M, result.M_min, _now(),
+         date))
+    conn.commit()
+    conn.close()
+
+
 # ========== Validation ==========
 
 def save_validation(date: str, result) -> None:
+    """写入 validation 表（仅回测使用，主流程用 save_snapshot）"""
     conn = _get_conn()
     conn.execute(INSERT_VALIDATION, (
         date, result.sbi, result.recommended_amount,
@@ -313,11 +515,17 @@ def save_validation(date: str, result) -> None:
 
 
 def update_actual(date: str, actual_open: float, actual_close: float) -> None:
-    prev = _get_validation_row(date)
-    if not prev:
-        return
-    p_est = prev["p_est"]
-    c_prev = prev["c_prev"]
+    """补录实际数据：从 snapshot 读 p_est/c_prev，写入 validation"""
+    snap = get_snapshot(date)
+    if snap:
+        p_est = snap["p_est"]
+        c_prev = snap["ndx_close_prev"]
+    else:
+        prev = _get_validation_row(date)
+        if not prev:
+            return
+        p_est = prev["p_est"]
+        c_prev = prev["c_prev"]
     deviation = ((actual_open - p_est) / p_est * 100) if p_est > 0 else 0
     entry_ret = ((actual_close - c_prev) / c_prev * 100) if c_prev > 0 else 0
 
@@ -338,13 +546,62 @@ def update_actual(date: str, actual_open: float, actual_close: float) -> None:
 
 
 def get_pending_validations() -> list[dict]:
+    """查找快照中有但 validation 实际数据缺失的记录"""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT date, p_est, c_prev FROM validation "
-        "WHERE ndx_actual_open IS NULL ORDER BY date"
+        "SELECT s.date, s.p_est, s.ndx_close_prev "
+        "FROM snapshot s "
+        "LEFT JOIN validation v ON s.date = v.date "
+        "WHERE v.date IS NULL OR v.ndx_actual_open IS NULL OR v.p_est_deviation IS NULL "
+        "ORDER BY s.date"
     ).fetchall()
     conn.close()
     return [{"date": r[0], "p_est": r[1], "c_prev": r[2]} for r in rows]
+
+
+def backfill_all_pending() -> list[str]:
+    """从 ndx_daily 补录所有缺失 actual 的 validation 记录，返回已补录的日期列表"""
+    pending = get_pending_validations()
+    if not pending:
+        return []
+    conn = _get_conn()
+    filled = []
+    for p in pending:
+        date = p["date"]
+        row = conn.execute(
+            "SELECT open, close FROM ndx_daily WHERE date = ?", (date,)
+        ).fetchone()
+        if not row:
+            continue
+        actual_open, actual_close = float(row[0]), float(row[1])
+        p_est = p["p_est"]
+        c_prev = p["c_prev"]
+        deviation = ((actual_open - p_est) / p_est * 100) if p_est > 0 else 0
+        entry_ret = ((actual_close - c_prev) / c_prev * 100) if c_prev > 0 else 0
+        next_row = conn.execute(
+            "SELECT close FROM ndx_daily WHERE date > ? ORDER BY date LIMIT 1", (date,)
+        ).fetchone()
+        fwd_ret = 0.0
+        if next_row and actual_close > 0:
+            fwd_ret = ((next_row[0] - actual_close) / actual_close * 100)
+        # INSERT OR REPLACE 确保无论 validation 有无该日期都能写入
+        conn.execute(
+            "INSERT OR REPLACE INTO validation "
+            "(date, sbi, amount, r_cpo, r_nq, r_fx, vix, c_prev, p_est, "
+            "base, omega_ext, omega_bias, omega_pos, rsi_bonus, "
+            "phi, tau_adx, omega_vol, bias_pct, rsi, adx, "
+            "ndx_actual_open, ndx_actual_close, "
+            "p_est_deviation, entry_return, forward_return, operate_time) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (date, 0, 0, 0, 0, 0, 0, c_prev, p_est,
+             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+             actual_open, actual_close,
+             round(deviation, 2), round(entry_ret, 2), round(fwd_ret, 2),
+             _now()))
+        filled.append(date)
+    conn.commit()
+    conn.close()
+    return filled
 
 
 def _get_validation_row(date: str):
@@ -355,12 +612,22 @@ def _get_validation_row(date: str):
 
 
 def get_validation_stats() -> dict:
+    """从 snapshot + validation JOIN 读取验证统计"""
     conn = _get_conn()
     rows = conn.execute(
-        "SELECT p_est_deviation, entry_return, forward_return, sbi, "
-        "p_est, ndx_actual_open, c_prev, ndx_actual_close, date "
-        "FROM validation WHERE p_est_deviation IS NOT NULL"
+        "SELECT v.p_est_deviation, v.entry_return, v.forward_return, "
+        "s.sbi, s.p_est, v.ndx_actual_open, s.ndx_close_prev, v.ndx_actual_close, v.date "
+        "FROM validation v "
+        "JOIN snapshot s ON v.date = s.date "
+        "WHERE v.p_est_deviation IS NOT NULL"
     ).fetchall()
+    # 回退：旧数据可能只在 validation 表中（无 snapshot）
+    if not rows:
+        rows = conn.execute(
+            "SELECT p_est_deviation, entry_return, forward_return, sbi, "
+            "p_est, ndx_actual_open, c_prev, ndx_actual_close, date "
+            "FROM validation WHERE p_est_deviation IS NOT NULL"
+        ).fetchall()
     conn.close()
     if not rows:
         return {"count": 0, "details": []}

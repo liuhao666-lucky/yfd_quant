@@ -62,7 +62,14 @@ def phi_vix(vix: float) -> float:
     Logistic: Φ = 0.6 + 1.6 / (1 + e^{-0.7 * (VIX - 14)})
     - VIX 低时 ≈ 0.6（风平浪静不冲动）
     - VIX 升高时平滑放大到接近 2.2（恐慌时贪婪）
+
+    Raises:
+        ValueError: VIX 数据异常
     """
+    if vix <= 0:
+        raise ValueError(f"VIX={vix}，数据异常（应 > 0），拒绝运行")
+    if vix > 100:
+        raise ValueError(f"VIX={vix}，数据异常（应 <= 100），拒绝运行")
     exponent = math.exp(-0.7 * (vix - 14.0))
     return round(0.6 + 1.6 / (1.0 + exponent), 4)
 

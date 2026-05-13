@@ -19,7 +19,7 @@ from yfd_quant.data.db import (
     insert_cpo_daily, insert_nq_daily, insert_fx_daily,
     insert_vix_daily,
     get_cpo_ma20,
-    get_nq_prev_close, get_nq_last_two,
+    get_nq_prev_close, get_nq_last_two, get_ndx_prev_close,
     get_fx_prev_close,
     has_final_record,
 )
@@ -70,6 +70,17 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
     if not sina.ok:
         raise DataUnavailableError(f"Sina 数据获取失败: {sina.error}")
 
+    # 关键数据非零校验（VIX/FX/NQ 为 0 说明接口异常，不能用零值跑模型）
+    critical = []
+    if sina.nq_price <= 0:
+        critical.append("NQ期货")
+    if sina.vix <= 0:
+        critical.append("VIX")
+    if sina.fx_price <= 0:
+        critical.append("FX汇率")
+    if critical and not weekend:
+        raise DataUnavailableError(f"关键数据缺失: {', '.join(critical)}，接口可能异常，拒绝运行")
+
     # CPO 检查：工作日缺失时警告（非阻断，节假日/网络波动可能）
     if sina.cpo_error and not weekend:
         logger.warning("CPO 数据获取失败，R_CPO 将为 0（可能影响模型准确性）")
@@ -100,16 +111,21 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
         raise DataUnavailableError("SQLite 无 NDX 历史数据")
     # 指标计算应基于昨天收盘后的数据，排除刚插入的最新行
     ndx_hist = ndx_df.iloc[:-1] if len(ndx_df) >= 2 else ndx_df
+    if len(ndx_hist) < 200:
+        raise DataUnavailableError(f"NDX 历史仅 {len(ndx_hist)} 行，不足 200 行，无法计算 MA200 等指标")
 
     # ---- 周末：NQ 期货冻结，用 NQ 历史表最近两天的变化 ----
     if weekend:
         nq_rows = get_nq_last_two()
         if len(nq_rows) == 2:
             friday_close, thursday_close = nq_rows[0], nq_rows[1]
-            r_nq = round((friday_close - thursday_close) / thursday_close * 100, 2)
-            logger.info(f"R_NQ(周末): 周五期货变化 "
-                        f"=({friday_close:.1f}-{thursday_close:.1f})/{thursday_close:.1f}*100"
-                        f"={r_nq:+.2f}%")
+            if thursday_close > 0:
+                r_nq = round((friday_close - thursday_close) / thursday_close * 100, 2)
+                logger.info(f"R_NQ(周末): 周五期货变化 "
+                            f"=({friday_close:.1f}-{thursday_close:.1f})/{thursday_close:.1f}*100"
+                            f"={r_nq:+.2f}%")
+            else:
+                logger.warning("R_NQ(周末): 周四收盘价为 0，无法计算涨跌幅")
 
     # ---- CPO 主跌浪 ----
     cpo_downtrend = _check_cpo_downtrend(sina.cpo_price)
@@ -125,6 +141,14 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
         r_fx = 0.0
         logger.warning(f"R_FX: 昨收缺失(prev={fx_prev:.4f} cur={sina.fx_price:.4f})——请运行 --capture-nq 补录")
 
+    # NDX 昨收：从数据库取（05:15 定时任务已录入），不依赖新浪接口
+    ndx_prev = get_ndx_prev_close()
+    if ndx_prev > 0:
+        logger.info(f"NDX昨收(DB) = {ndx_prev:.2f}")
+    else:
+        ndx_prev = sina.ndx_prev_close
+        logger.warning(f"NDX昨收DB缺失，降级使用新浪接口值 = {ndx_prev:.2f}")
+
     return MarketSnapshot(
         timestamp=timestamp,
         r_cpo=round(sina.cpo_change_pct, 2),
@@ -134,7 +158,7 @@ def fetch_all() -> Tuple[MarketSnapshot, bool]:
         cpo_ma20_yesterday=get_cpo_ma20()[0],
         cpo_ma20_5days_ago=get_cpo_ma20()[1],
         cpo_downtrend=cpo_downtrend,
-        ndx_close_prev=sina.ndx_prev_close,
+        ndx_close_prev=ndx_prev,
         ndx_historical=ndx_hist,  # 用 t-1 数据计算指标
         vix=sina.vix,
         indicators_ready=False,

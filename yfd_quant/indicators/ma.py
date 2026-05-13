@@ -14,7 +14,7 @@ def sma(series: pd.Series, period: int) -> float:
         最近一期 SMA 值
     """
     if len(series) < period:
-        return float(series.mean())
+        raise ValueError(f"SMA({period}) 需要至少 {period} 行数据，当前仅 {len(series)} 行")
     return float(series.tail(period).mean())
 
 

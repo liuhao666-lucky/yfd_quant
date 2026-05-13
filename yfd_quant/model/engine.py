@@ -32,12 +32,17 @@ class QuantEngine:
         Returns:
             ModelResult 包含 SBI、建议金额和完整分解
         """
+        # ---- 输入校验 ----
+        if snapshot.ndx_close_prev <= 0:
+            raise ValueError(f"NDX 昨收={snapshot.ndx_close_prev}，数据异常，拒绝运行")
+        if M < M_min:
+            raise ValueError(f"M={M} < M_min={M_min}，配置错误")
+
         # ---- 计算技术指标 ----
         if snapshot.ndx_historical is not None and not snapshot.ndx_historical.empty:
             indicators = compute_indicators(snapshot.ndx_historical)
         else:
-            logger.error("无 NDX 历史数据，无法计算技术指标")
-            raise ValueError("NDX 历史数据缺失")
+            raise ValueError("NDX 历史数据为空，无法计算技术指标")
 
         # ---- 模块一：单指标吸引力 ----
         f_cpo = attraction_score(snapshot.r_cpo)
