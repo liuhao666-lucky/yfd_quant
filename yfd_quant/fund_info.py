@@ -203,7 +203,7 @@ def get_latest_nav(fundcode="012922") -> dict | None:
         return {
             "date": navdate,
             "nav": float(nav),
-            "daily_return": float(dayinc) / 100 if dayinc else 0.0,
+            "daily_return": float(dayinc) if dayinc else 0.0,
         }
     except (ValueError, TypeError):
         return None

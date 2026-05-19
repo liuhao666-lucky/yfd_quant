@@ -25,7 +25,7 @@ from yfd_quant.data.db import (
     insert_nq_daily, get_nq_prev_close,
     save_validation, save_snapshot, get_snapshot, snapshot_to_result,
     snapshot_to_market_snapshot, update_snapshot_derived,
-    update_actual, get_pending_validations, backfill_all_pending,
+    update_actual, get_pending_validations, backfill_all_pending, fix_forward_returns,
     get_validation_stats,
     insert_fund_nav, get_fund_navs,
 )
@@ -258,7 +258,14 @@ def main():
             print(f"[{n+1}/5] VIX: {us_date} C={s.vix:.2f} is_final={is_final}")
             n += 1
 
-        # validation 补录
+        # validation 补录：先用 ndx_daily 创建缺失行，再用实时数据更新
+        filled = backfill_all_pending()
+        if filled:
+            print(f"[4/4] 从 ndx_daily 补录 validation: {filled}")
+        # 修复 forward_return=0 但下一天数据已有的记录
+        fixed_fwd = fix_forward_returns()
+        if fixed_fwd:
+            print(f"[4/4] 修复 forward_return: {fixed_fwd}")
         pending = get_pending_validations()
         msg_parts = []
         if pending and s.ndx_open > 0 and s.ndx_price > 0:
@@ -384,17 +391,22 @@ def main():
                 sbi_label = "强烈买入" if d["sbi"] >= 70 else ("适当买入" if d["sbi"] >= 40 else "仅底仓")
                 fwd = d["forward_return"]
                 fwd_str = f"{fwd:+.2f}%" if fwd and fwd != 0 else "待次日补录"
+                fund_entry = d.get("fund_entry_return")
+                fund_fwd = d.get("fund_forward_return")
+                fund_entry_str = f"{fund_entry:+.2f}%" if fund_entry else "--"
+                fund_fwd_str = f"{fund_fwd:+.2f}%" if fund_fwd else "待T+2补录"
                 print(f"--- {d['date']} (SBI={d['sbi']:.0f} {sbi_label}) ---")
                 print(f"  P_est 偏差: {d['deviation_calc']}")
                 print(f"    正=低估(实际>预估)  负=高估(实际<预估)")
-                print(f"  entry_return(入场日涨跌): {d['entry_calc']}")
-                print(f"    负=买到跌了=划算  正=买到涨了=买贵了")
-                print(f"  forward_return(买入后涨跌): {fwd_str}")
-                print(f"    正=买入后涨了=赚了  负=买入后跌了  待次日记入")
+                print(f"  NDX entry_return(入场日涨跌): {d['entry_calc']}")
+                print(f"  NDX forward_return(买入后涨跌): {fwd_str}")
+                print(f"  基金 entry_return(入场日涨跌): {fund_entry_str}")
+                print(f"  基金 forward_return(买入后涨跌): {fund_fwd_str}")
                 print()
 
             print(f"[汇总] P_est 平均绝对偏差: {stats['p_est_mae']:.2f}% | 方向偏差: {stats['p_est_bias']:+.2f}%")
-            print(f"[汇总] 入场日均收益: {stats['avg_entry_return']:+.2f}% | 买入后均收益: {stats['avg_forward_return']:+.2f}%")
+            print(f"[汇总] NDX 入场日均收益: {stats['avg_entry_return']:+.2f}% | 买入后均收益: {stats['avg_forward_return']:+.2f}%")
+            print(f"[汇总] 基金入场日均收益: {stats['avg_fund_entry_return']:+.2f}% | 买入后均收益: {stats['avg_fund_forward_return']:+.2f}%")
             print(f"[分桶] SBI<30: {stats['sbi_buckets']['low']['count']}天 | 30-70: {stats['sbi_buckets']['mid']['count']}天 | >=70: {stats['sbi_buckets']['high']['count']}天")
 
         if navs:

@@ -164,6 +164,7 @@ INSERT_VALIDATION = (
 UPDATE_VALIDATION = (
     "UPDATE validation SET ndx_actual_open=?, ndx_actual_close=?, "
     "p_est_deviation=?, entry_return=?, forward_return=?, "
+    "fund_entry_return=?, fund_forward_return=?, "
     "operate_time=? WHERE date=?"
 )
 
@@ -182,6 +183,15 @@ INSERT_FUND = (
 
 
 # ========== 底层操作 ==========
+
+def _migrate_validation(conn: sqlite3.Connection) -> None:
+    """迁移：给 validation 表新增基金收益列"""
+    for col in ("fund_entry_return REAL", "fund_forward_return REAL"):
+        try:
+            conn.execute(f"ALTER TABLE validation ADD COLUMN {col}")
+        except sqlite3.OperationalError:
+            pass  # 列已存在
+
 
 def _migrate_snapshot(conn: sqlite3.Connection) -> None:
     """迁移：删除快照表中已废弃的 CPO 中间变量列"""
@@ -217,6 +227,7 @@ def _get_conn() -> sqlite3.Connection:
     conn.execute(CREATE_SNAPSHOT)
     conn.execute(CREATE_VALIDATION)
     conn.execute(CREATE_FUND)
+    _migrate_validation(conn)
     conn.commit()
     _migrate_snapshot(conn)
     conn.commit()
@@ -516,6 +527,10 @@ def save_validation(date: str, result) -> None:
 
 def update_actual(date: str, actual_open: float, actual_close: float) -> None:
     """补录实际数据：从 snapshot 读 p_est/c_prev，写入 validation"""
+    # 跳过已有 actual 数据的行（backfill 已写入）
+    existing = _get_validation_row(date)
+    if existing and existing.get("ndx_actual_open"):
+        return
     snap = get_snapshot(date)
     if snap:
         p_est = snap["p_est"]
@@ -537,12 +552,39 @@ def update_actual(date: str, actual_open: float, actual_close: float) -> None:
     if next_row and actual_close > 0:
         fwd_ret = ((next_row[0] - actual_close) / actual_close * 100)
 
+    # 基金收益
+    fund_entry_ret, fund_fwd_ret = _compute_fund_returns(date)
+
     conn.execute(UPDATE_VALIDATION, (
         actual_open, actual_close,
         round(deviation, 2), round(entry_ret, 2), round(fwd_ret, 2),
+        round(fund_entry_ret, 4), round(fund_fwd_ret, 4),
         _now(), date))
     conn.commit()
     conn.close()
+
+
+def _compute_fund_returns(date: str) -> tuple[float, float]:
+    """计算基金 entry_return 和 forward_return，返回 (entry, forward)"""
+    nav_today = _get_fund_nav(date)
+    if not nav_today:
+        return 0.0, 0.0
+    # entry_return: (nav[T] - nav[T-1]) / nav[T-1] * 100
+    # fund_nav 表中 T-1 的数据：找 < date 的最后一条
+    conn = _get_conn()
+    prev_row = conn.execute(
+        "SELECT nav FROM fund_nav WHERE date < ? ORDER BY date DESC LIMIT 1", (date,)
+    ).fetchone()
+    conn.close()
+    fund_entry_ret = 0.0
+    if prev_row and prev_row[0] > 0:
+        fund_entry_ret = (nav_today - prev_row[0]) / prev_row[0] * 100
+    # forward_return: (nav[T+1] - nav[T]) / nav[T] * 100
+    next_nav = _get_next_fund_nav(date)
+    fund_fwd_ret = 0.0
+    if next_nav and nav_today > 0:
+        fund_fwd_ret = (next_nav[1] - nav_today) / nav_today * 100
+    return fund_entry_ret, fund_fwd_ret
 
 
 def get_pending_validations() -> list[dict]:
@@ -584,6 +626,23 @@ def backfill_all_pending() -> list[str]:
         fwd_ret = 0.0
         if next_row and actual_close > 0:
             fwd_ret = ((next_row[0] - actual_close) / actual_close * 100)
+        # 从 snapshot 读取模型字段（而非填 0）
+        snap = conn.execute(
+            "SELECT sbi, amount, r_cpo, r_nq, r_fx, vix, base, "
+            "omega_ext, omega_bias, omega_pos, rsi_bonus, "
+            "phi, tau_adx, omega_vol, bias_pct, rsi, adx "
+            "FROM snapshot WHERE date=?", (date,)
+        ).fetchone()
+        if snap:
+            (sbi, amount, r_cpo, r_nq, r_fx, vix, base,
+             omega_ext, omega_bias, omega_pos, rsi_bonus,
+             phi, tau_adx, omega_vol, bias_pct, rsi, adx) = snap
+        else:
+            sbi = amount = r_cpo = r_nq = r_fx = vix = base = 0
+            omega_ext = omega_bias = omega_pos = rsi_bonus = 0
+            phi = tau_adx = omega_vol = bias_pct = rsi = adx = 0
+        # 基金收益
+        fund_entry_ret, fund_fwd_ret = _compute_fund_returns(date)
         # INSERT OR REPLACE 确保无论 validation 有无该日期都能写入
         conn.execute(
             "INSERT OR REPLACE INTO validation "
@@ -591,12 +650,15 @@ def backfill_all_pending() -> list[str]:
             "base, omega_ext, omega_bias, omega_pos, rsi_bonus, "
             "phi, tau_adx, omega_vol, bias_pct, rsi, adx, "
             "ndx_actual_open, ndx_actual_close, "
-            "p_est_deviation, entry_return, forward_return, operate_time) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            (date, 0, 0, 0, 0, 0, 0, c_prev, p_est,
-             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            "p_est_deviation, entry_return, forward_return, "
+            "fund_entry_return, fund_forward_return, operate_time) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (date, sbi, amount, r_cpo, r_nq, r_fx, vix, c_prev, p_est,
+             base, omega_ext, omega_bias, omega_pos, rsi_bonus,
+             phi, tau_adx, omega_vol, bias_pct, rsi, adx,
              actual_open, actual_close,
              round(deviation, 2), round(entry_ret, 2), round(fwd_ret, 2),
+             round(fund_entry_ret, 4), round(fund_fwd_ret, 4),
              _now()))
         filled.append(date)
     conn.commit()
@@ -604,11 +666,51 @@ def backfill_all_pending() -> list[str]:
     return filled
 
 
+def fix_forward_returns() -> list[str]:
+    """修复 forward_return 和 fund_*_return 中为 0 但数据已有的记录"""
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT v.date, v.ndx_actual_close, v.fund_entry_return, v.fund_forward_return "
+        "FROM validation v "
+        "WHERE v.ndx_actual_close > 0 "
+        "AND (v.forward_return = 0 OR v.fund_entry_return = 0 OR v.fund_forward_return = 0)"
+    ).fetchall()
+    fixed = []
+    for date, actual_close, fund_entry, fund_fwd in rows:
+        updates = {}
+        # 修复 NDX forward_return
+        if fund_fwd is not None and actual_close > 0:
+            pass  # 下面统一处理
+        next_row = conn.execute(
+            "SELECT close FROM ndx_daily WHERE date > ? ORDER BY date LIMIT 1", (date,)
+        ).fetchone()
+        if next_row and actual_close > 0:
+            fwd_ret = (next_row[0] - actual_close) / actual_close * 100
+            updates["forward_return"] = round(fwd_ret, 2)
+        # 修复基金收益
+        fund_entry_ret, fund_fwd_ret = _compute_fund_returns(date)
+        if (not fund_entry or fund_entry == 0) and fund_entry_ret != 0:
+            updates["fund_entry_return"] = round(fund_entry_ret, 4)
+        if (not fund_fwd or fund_fwd == 0) and fund_fwd_ret != 0:
+            updates["fund_forward_return"] = round(fund_fwd_ret, 4)
+        if updates:
+            set_clause = ", ".join(f"{k}=?" for k in updates)
+            values = list(updates.values()) + [_now(), date]
+            conn.execute(
+                f"UPDATE validation SET {set_clause}, operate_time=? WHERE date=?",
+                values
+            )
+            fixed.append(date)
+    conn.commit()
+    conn.close()
+    return fixed
+
+
 def _get_validation_row(date: str):
     conn = _get_conn()
-    row = conn.execute("SELECT p_est, c_prev FROM validation WHERE date=?", (date,)).fetchone()
+    row = conn.execute("SELECT p_est, c_prev, ndx_actual_open FROM validation WHERE date=?", (date,)).fetchone()
     conn.close()
-    return {"p_est": row[0], "c_prev": row[1]} if row else None
+    return {"p_est": row[0], "c_prev": row[1], "ndx_actual_open": row[2]} if row else None
 
 
 def get_validation_stats() -> dict:
@@ -616,7 +718,8 @@ def get_validation_stats() -> dict:
     conn = _get_conn()
     rows = conn.execute(
         "SELECT v.p_est_deviation, v.entry_return, v.forward_return, "
-        "s.sbi, s.p_est, v.ndx_actual_open, s.ndx_close_prev, v.ndx_actual_close, v.date "
+        "s.sbi, s.p_est, v.ndx_actual_open, s.ndx_close_prev, v.ndx_actual_close, v.date, "
+        "v.fund_entry_return, v.fund_forward_return "
         "FROM validation v "
         "JOIN snapshot s ON v.date = s.date "
         "WHERE v.p_est_deviation IS NOT NULL"
@@ -625,7 +728,8 @@ def get_validation_stats() -> dict:
     if not rows:
         rows = conn.execute(
             "SELECT p_est_deviation, entry_return, forward_return, sbi, "
-            "p_est, ndx_actual_open, c_prev, ndx_actual_close, date "
+            "p_est, ndx_actual_open, c_prev, ndx_actual_close, date, "
+            "fund_entry_return, fund_forward_return "
             "FROM validation WHERE p_est_deviation IS NOT NULL"
         ).fetchall()
     conn.close()
@@ -635,6 +739,8 @@ def get_validation_stats() -> dict:
     deviations = [r[0] for r in rows]
     entry_rets = [r[1] for r in rows]
     fwd_rets = [r[2] for r in rows if r[2] is not None and r[2] != 0]
+    fund_entry_rets = [r[9] for r in rows if r[9] is not None and r[9] != 0]
+    fund_fwd_rets = [r[10] for r in rows if r[10] is not None and r[10] != 0]
     sbis = [r[3] for r in rows]
 
     details = []
@@ -644,6 +750,7 @@ def get_validation_stats() -> dict:
             "c_prev": r[6], "actual_close": r[7],
             "deviation": r[0], "entry_return": r[1],
             "forward_return": r[2], "sbi": r[3],
+            "fund_entry_return": r[9], "fund_forward_return": r[10],
             "deviation_calc": f"({r[5]:.1f} - {r[4]:.1f}) / {r[4]:.1f} * 100 = {r[0]:+.2f}%",
             "entry_calc": f"({r[7]:.1f} - {r[6]:.1f}) / {r[6]:.1f} * 100 = {r[1]:+.2f}%",
         })
@@ -660,6 +767,8 @@ def get_validation_stats() -> dict:
         "p_est_bias": sum(deviations) / len(deviations),
         "avg_entry_return": sum(entry_rets) / len(entry_rets),
         "avg_forward_return": sum(fwd_rets) / len(fwd_rets) if fwd_rets else 0,
+        "avg_fund_entry_return": sum(fund_entry_rets) / len(fund_entry_rets) if fund_entry_rets else 0,
+        "avg_fund_forward_return": sum(fund_fwd_rets) / len(fund_fwd_rets) if fund_fwd_rets else 0,
         "sbi_buckets": {k: {"count": len(v), "avg_return": sum(v)/len(v) if v else 0}
                         for k, v in buckets.items()},
         "details": details,
@@ -680,6 +789,24 @@ def get_fund_navs() -> list[dict]:
     rows = conn.execute("SELECT date, nav, daily_return FROM fund_nav ORDER BY date").fetchall()
     conn.close()
     return [{"date": r[0], "nav": r[1], "daily_return": r[2]} for r in rows]
+
+
+def _get_fund_nav(date: str) -> float | None:
+    """查 fund_nav 表某日净值，不存在返回 None"""
+    conn = _get_conn()
+    row = conn.execute("SELECT nav FROM fund_nav WHERE date=?", (date,)).fetchone()
+    conn.close()
+    return float(row[0]) if row else None
+
+
+def _get_next_fund_nav(date: str) -> tuple[str, float] | None:
+    """查 fund_nav 表 > date 的第一条记录，返回 (date, nav) 或 None"""
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT date, nav FROM fund_nav WHERE date > ? ORDER BY date LIMIT 1", (date,)
+    ).fetchone()
+    conn.close()
+    return (row[0], float(row[1])) if row else None
 
 
 # ========== Import ==========
