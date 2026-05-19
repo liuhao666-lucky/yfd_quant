@@ -713,6 +713,105 @@ def _get_validation_row(date: str):
     return {"p_est": row[0], "c_prev": row[1], "ndx_actual_open": row[2]} if row else None
 
 
+def check_and_fix_prev_day_returns(prev_date: str) -> dict:
+    """检查并修复前一个交易日的 return 字段，返回检查结果
+
+    Args:
+        prev_date: 前一个交易日日期，格式 'YYYY-MM-DD'
+
+    Returns:
+        {
+            "date": str,
+            "has_record": bool,
+            "issues": list[str],      # 发现的问题
+            "fixed": list[str],       # 已修复的字段
+            "unfixable": list[str],   # 无法修复的字段（缺少基础数据）
+        }
+    """
+    result = {"date": prev_date, "has_record": False, "issues": [], "fixed": [], "unfixable": []}
+
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT entry_return, forward_return, fund_entry_return, fund_forward_return, "
+        "ndx_actual_close, c_prev FROM validation WHERE date=?",
+        (prev_date,)
+    ).fetchone()
+    conn.close()
+
+    if not row:
+        result["issues"].append(f"validation 表中无 {prev_date} 记录")
+        return result
+
+    result["has_record"] = True
+    entry_ret, fwd_ret, fund_entry_ret, fund_fwd_ret, actual_close, c_prev = row
+
+    # 检查 NDX entry_return
+    if (entry_ret is None or entry_ret == 0) and actual_close and c_prev and c_prev > 0:
+        computed = (actual_close - c_prev) / c_prev * 100
+        result["issues"].append(f"entry_return={entry_ret}，应为 {computed:.2f}")
+        # 修复
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE validation SET entry_return=?, operate_time=? WHERE date=?",
+            (round(computed, 2), _now(), prev_date)
+        )
+        conn.commit()
+        conn.close()
+        result["fixed"].append(f"entry_return={computed:.2f}")
+
+    # 检查 NDX forward_return
+    if (fwd_ret is None or fwd_ret == 0) and actual_close and actual_close > 0:
+        conn = _get_conn()
+        next_row = conn.execute(
+            "SELECT close FROM ndx_daily WHERE date > ? ORDER BY date LIMIT 1", (prev_date,)
+        ).fetchone()
+        conn.close()
+        if next_row:
+            computed = (next_row[0] - actual_close) / actual_close * 100
+            result["issues"].append(f"forward_return={fwd_ret}，应为 {computed:.2f}")
+            conn = _get_conn()
+            conn.execute(
+                "UPDATE validation SET forward_return=?, operate_time=? WHERE date=?",
+                (round(computed, 2), _now(), prev_date)
+            )
+            conn.commit()
+            conn.close()
+            result["fixed"].append(f"forward_return={computed:.2f}")
+        else:
+            result["unfixable"].append("forward_return（次日 NDX 数据未到）")
+
+    # 检查基金收益率
+    fund_entry_computed, fund_fwd_computed = _compute_fund_returns(prev_date)
+
+    if (fund_entry_ret is None or fund_entry_ret == 0) and fund_entry_computed != 0:
+        result["issues"].append(f"fund_entry_return={fund_entry_ret}，应为 {fund_entry_computed:.4f}")
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE validation SET fund_entry_return=?, operate_time=? WHERE date=?",
+            (round(fund_entry_computed, 4), _now(), prev_date)
+        )
+        conn.commit()
+        conn.close()
+        result["fixed"].append(f"fund_entry_return={fund_entry_computed:.4f}")
+    elif (fund_entry_ret is None or fund_entry_ret == 0) and fund_entry_computed == 0:
+        result["unfixable"].append("fund_entry_return（基金净值数据不足）")
+
+    if (fund_fwd_ret is None or fund_fwd_ret == 0) and fund_fwd_computed != 0:
+        result["issues"].append(f"fund_forward_return={fund_fwd_ret}，应为 {fund_fwd_computed:.4f}")
+        conn = _get_conn()
+        conn.execute(
+            "UPDATE validation SET fund_forward_return=?, operate_time=? WHERE date=?",
+            (round(fund_fwd_computed, 4), _now(), prev_date)
+        )
+        conn.commit()
+        conn.close()
+        result["fixed"].append(f"fund_forward_return={fund_fwd_computed:.4f}")
+    elif (fund_fwd_ret is None or fund_fwd_ret == 0) and fund_fwd_computed == 0:
+        result["unfixable"].append("fund_forward_return（次日基金净值未到）")
+
+    return result
+
+
 def get_validation_stats() -> dict:
     """从 snapshot + validation JOIN 读取验证统计"""
     conn = _get_conn()

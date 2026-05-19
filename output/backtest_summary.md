@@ -1,21 +1,21 @@
 # Backtest Summary
 
-**Period**: 2026-04-30 ~ 2026-05-14
-**Trades**: 8 | **Skipped**: 1
+**Period**: 2026-04-30 ~ 2026-05-15
+**Trades**: 9 | **Skipped**: 1
 
 ## Returns
 | Metric | Value |
 |--------|-------|
-| Model Cumulative Return | 2.83% |
+| Model Cumulative Return | -0.36% |
 | Fixed DCA | 0.0% |
-| NDX Buy & Hold | 7.75% |
-| Total Invested | 58.26 CNY |
-| Total PnL | 1.65 CNY |
+| NDX Buy & Hold | 6.09% |
+| Total Invested | 75.26 CNY |
+| Total PnL | -0.27 CNY |
 
 ## Risk
 | Metric | Value |
 |--------|-------|
-| Sharpe Ratio | 1.85 |
-| Max Drawdown | 3.73% |
-| Win Rate | 57.1% |
-| Profit Factor | 1.0 |
+| Sharpe Ratio | -0.21 |
+| Max Drawdown | 5.79% |
+| Win Rate | 50.0% |
+| Profit Factor | 0.97 |

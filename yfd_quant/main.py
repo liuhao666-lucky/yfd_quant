@@ -26,9 +26,10 @@ from yfd_quant.data.db import (
     save_validation, save_snapshot, get_snapshot, snapshot_to_result,
     snapshot_to_market_snapshot, update_snapshot_derived,
     update_actual, get_pending_validations, backfill_all_pending, fix_forward_returns,
-    get_validation_stats,
+    get_validation_stats, check_and_fix_prev_day_returns,
     insert_fund_nav, get_fund_navs,
 )
+from yfd_quant.data.date_utils import previous_trading_day
 from yfd_quant.model.engine import QuantEngine
 from yfd_quant.output.console import render as console_render, render_debug
 from yfd_quant.output.json_writer import write_single, append_history
@@ -282,17 +283,34 @@ def main():
         elif pending:
             print(f"[4/4] 跳过补录 ({len(pending)}条待补录)")
 
-        # 6. 基金净值（自动从接口获取）
+        # 5. 前交易日数据完整性检查（在获取基金净值后执行，确保基金收益率能正确计算）
+        # 先获取基金净值，再检查
         try:
             nav_data = get_latest_nav(config.get("fund_code", "012922"))
             if nav_data:
                 insert_fund_nav(nav_data["date"], nav_data["nav"],
                                 nav_data["daily_return"])
-                print(f"[6] 基金净值: {nav_data['date']} NAV={nav_data['nav']:.4f}")
+                print(f"[5] 基金净值: {nav_data['date']} NAV={nav_data['nav']:.4f}")
         except Exception as e:
-            print(f"[6] 基金净值获取失败: {e}")
+            print(f"[5] 基金净值获取失败: {e}")
 
-        # 推送
+        # 检查前一个交易日的数据完整性
+        now = datetime.now()
+        prev_trade_date = previous_trading_day(now).strftime("%Y-%m-%d")
+        check_result = check_and_fix_prev_day_returns(prev_trade_date)
+        if check_result["issues"]:
+            print(f"[5] 前交易日 {prev_trade_date} 数据检查:")
+            for issue in check_result["issues"]:
+                print(f"    - {issue}")
+            if check_result["fixed"]:
+                print(f"    已修复: {check_result['fixed']}")
+            if check_result["unfixable"]:
+                print(f"    待补录: {check_result['unfixable']}")
+            msg_parts.append(f"前日数据修复: {', '.join(check_result['fixed'])}" if check_result["fixed"] else "")
+        else:
+            print(f"[5] 前交易日 {prev_trade_date} 数据完整")
+
+        # 6. 推送
         wc = config.get("notify", {}).get("wecom_webhook", "")
         if wc:
             ok = send_capture_result(s, msg_parts, wc)
