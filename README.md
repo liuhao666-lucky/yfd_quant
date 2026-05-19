@@ -236,8 +236,7 @@ python -m yfd_quant.fund_info --save-csv               # 保存 90 日净值 CSV
 ### 5.5 回测
 
 ```bash
-python -m yfd_quant.backtest -M 20 --min 0             # 基础回测
-python -m yfd_quant.backtest -M 20 --min 0 --save-to-db # 写入验证表
+python -m yfd_quant.backtest                          # 基于 snapshot 表回测（推荐）
 ```
 
 ### 5.6 验证与补录
@@ -554,29 +553,44 @@ graph TD
 ## 10. 回测与分析
 
 ```bash
-python -m yfd_quant.backtest -M 20 --min 0 --save-to-db
+python -m yfd_quant.backtest
 ```
+
+### 数据来源
+
+回测基于 **snapshot 表**（14:50 决策时刻冻结的数据），而非收盘后的原始数据表。这确保：
+- 使用模型当时真正看到的盘中数据（r_cpo、r_nq、r_fx 等）
+- 避免"未来幻觉"（收盘价在 14:50 时还不存在）
+- 回测结果反映模型的真实决策表现
 
 ### 输出文件
 
 | 文件 | 内容 |
 |------|------|
 | output/backtest_records.csv | 每日 SBI、金额、份额、收益率 |
-| output/backtest_chart.png | 累计收益曲线 vs NDX 基准 |
+| output/backtest_chart.png | 累计收益曲线 vs 合成基准 |
 | output/backtest_summary.md | 收益率、夏普比率、最大回撤、胜率 |
 
 ### 关键指标解读
 
 | 指标 | 含义 | 参考标准 |
 |------|------|----------|
-| Sharpe Ratio | 风险调整后收益 | >1 良好，>2 优秀 |
-| Max Drawdown | 最大回撤 | <20% 可接受 |
+| Sharpe Ratio | 风险调整后收益（交易日<10时显示 N/A） | >1 良好，>2 优秀 |
+| Max Drawdown | 最大回撤（基于单位净值曲线） | <20% 可接受 |
 | Win Rate | 交易胜率 | >50% |
 | Profit Factor | 盈亏比 | >1.5 良好 |
 
-### 前视偏差杜绝
+### 基准对比
 
-回测严格保证：T 日的模型输入只能使用 T-1 及之前的数据。涨跌幅从历史表按日期索引精确计算。
+| 基准 | 说明 |
+|------|------|
+| Synthetic Benchmark | 合成基准：35%光模块 + 55%纳指 + 10%汇率 |
+
+**为什么用合成基准？** 基金底层资产配置为 35% A股光模块 + 55% 美股纳指 + 10% 汇率敞口。与纯纳指比较会因资产不同步而误判策略好坏，合成基准才是真正的超额收益衡量标准。
+
+### 最大回撤计算
+
+最大回撤基于**单位净值曲线**（market_value / shares）而非市值曲线。这样即使持续定投导致市值创新高，只要基金净值下跌，回撤就会被真实记录，反映每份基金份额经历的真实波动。
 
 ---
 
@@ -585,7 +599,7 @@ python -m yfd_quant.backtest -M 20 --min 0 --save-to-db
 1. **检查持仓权重**：运行 `python -m yfd_quant.fund_info --show-holdings` 查看最新持仓分布，与模型权重对比
 2. **更新 config.yaml**：若持仓偏离较大，调整 `layer2_base.py` 中的 W_CPO/W_NQ/W_FX，同步更新 `config.yaml` 中 `weight_version`
 3. **验证数据源**：运行 `python -m yfd_quant.main --test` 确认所有接口正常
-4. **季度回测**：运行 `python -m yfd_quant.backtest -M 20 --min 0 --save-to-db` 更新验证数据
+4. **季度回测**：运行 `python -m yfd_quant.backtest` 查看模型表现
 
 ---
 
